@@ -1,0 +1,83 @@
+<idea-plugin>
+    <id>fr.thanhhungdoan.tomcatdevrunner</id>
+    <name>Dev Runner for Apache Tomcat</name>
+    <vendor url="https://www.linkedin.com/in/thanh-hung-doan/">Thanh-Hung DOAN</vendor>
+    <description><![CDATA[
+    Runs a Maven WAR module on a local Apache Tomcat 10/11 straight from your build output, with hot reload of Java and Angular changes.
+    <br/><br/>
+    <b>No packaging, no copying, no project changes.</b> The plugin generates a private Tomcat base for development and mounts
+    your sources directly into the webapp:
+    <ul>
+      <li><code>target/classes</code> of the WAR module and of every jar module it depends on</li>
+      <li>Maven runtime libraries (provided/test scopes and container jars are excluded)</li>
+      <li><code>src/main/webapp</code> and the Angular build output (read from <code>angular.json</code>)</li>
+      <li>Maven-filtered <code>context.xml</code> / <code>WEB-INF</code> files from <code>target/&lt;finalName&gt;</code></li>
+    </ul>
+    <b>Hot reload</b>
+    <ul>
+      <li>Save a Java file → only its module is compiled → HotSwap when debugging.</li>
+      <li>Structural changes (new fields, methods, endpoints, beans) → automatic context reload through JMX
+          in a few seconds, without restarting Tomcat. Works in Run mode too.</li>
+      <li>Angular: start <code>ng build --watch</code> from the IDE; browser caching is disabled for development.</li>
+    </ul>
+    <b>Configuration</b>
+    <ul>
+      <li>Run configuration <i>Tomcat Dev</i> with Run and Debug, plus an automatic Build before launch.</li>
+      <li>Tomcat, <code>server.xml</code> and <code>context.xml</code> are auto-detected in their usual locations
+          (CATALINA_HOME, tomcat-maven-plugin, maven-war-plugin, META-INF) and can be overridden.</li>
+      <li>Existing JNDI resources and parameters in <code>context.xml</code> are preserved.</li>
+    </ul>
+    ]]></description>
+
+    <change-notes><![CDATA[
+    <b>2.2.0</b>
+    <ul>
+      <li>Renamed to Dev Runner for Apache Tomcat; English user interface and documentation.</li>
+      <li>Plugin icon, Marketplace metadata, signing and publishing configuration.</li>
+    </ul>
+    <b>2.1.1</b>
+    <ul><li>Disable browser caching of static files in the development Tomcat (no project changes).</li></ul>
+    <b>2.1.0</b>
+    <ul><li>Context reload through JMX for structural Java changes; four reload modes.</li></ul>
+    <b>2.0.0</b>
+    <ul><li>Standalone Tomcat run configuration (no SmartTomcat needed); sources mounted instead of copied.</li></ul>
+    ]]></change-notes>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <depends>org.jetbrains.idea.maven</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <configurationType implementation="dev.tomcatdev.run.TomcatDevConfigurationType"/>
+        <postStartupActivity implementation="dev.tomcatdev.hotreload.HotReloadStartup"/>
+        <projectConfigurable parentId="tools"
+                             instance="dev.tomcatdev.hotreload.HotReloadConfigurable"
+                             id="dev.tomcatdev.settings"
+                             displayName="Dev Runner for Apache Tomcat"/>
+        <toolWindow id="Tomcat Dev" anchor="bottom" icon="AllIcons.Actions.Refresh"
+                    factoryClass="dev.tomcatdev.hotreload.HotReloadToolWindowFactory"/>
+        <notificationGroup id="Dev Runner for Apache Tomcat" displayType="BALLOON"/>
+    </extensions>
+
+    <projectListeners>
+        <listener class="dev.tomcatdev.hotreload.SourceChangeListener"
+                  topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+        <listener class="dev.tomcatdev.hotreload.CompileFinishedListener"
+                  topic="com.intellij.openapi.compiler.CompilationStatusListener"/>
+    </projectListeners>
+
+    <actions>
+        <group id="TomcatDev.Menu" text="Dev Runner for Apache Tomcat" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="TomcatDev.Toggle" class="dev.tomcatdev.actions.ToggleEnabledAction" text="Enable Hot Reload"/>
+            <action id="TomcatDev.Reload" class="dev.tomcatdev.actions.ReloadContextAction" text="Reload Context"
+                    description="Reload the webapp (new classes, fields, methods) without restarting Tomcat"/>
+            <action id="TomcatDev.Restart" class="dev.tomcatdev.actions.RestartTomcatAction" text="Restart Tomcat"/>
+            <action id="TomcatDev.OpenBase" class="dev.tomcatdev.actions.OpenCatalinaBaseAction"
+                    text="Open Generated CATALINA_BASE"/>
+            <separator/>
+            <action id="TomcatDev.AngularStart" class="dev.tomcatdev.actions.StartAngularWatchAction" text="Start Angular Watch"/>
+            <action id="TomcatDev.AngularStop" class="dev.tomcatdev.actions.StopAngularWatchAction" text="Stop Angular Watch"/>
+        </group>
+    </actions>
+</idea-plugin>

@@ -1,0 +1,9 @@
+.gradle/
+build/
+.idea/
+.intellijPlatform/
+*.iml
+# signing material — never commit
+*.pem
+*.crt
+certificate/
