@@ -521,4 +521,4 @@ The generated configuration and Tomcat's own log files are in the folder opened 
 
 ---
 
-**Author:** Thanh-Hung DOAN — Île-de-France, France · [LinkedIn](https://www.linkedin.com/in/thanh-hung-doan/) · License: MIT
+**Author:** Thanh-Hung DOAN — Île-de-France, France · [LinkedIn](https://www.linkedin.com/in/thanh-hung-doan/) · Source: [GitHub](https://github.com/thanhhungpro8x/tomcat-dev-runner) · License: MIT

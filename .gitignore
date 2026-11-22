@@ -7,3 +7,5 @@ build/
 *.pem
 *.crt
 certificate/
+# macOS
+.DS_Store

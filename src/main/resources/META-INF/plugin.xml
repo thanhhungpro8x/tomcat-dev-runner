@@ -1,4 +1,4 @@
-<idea-plugin>
+<idea-plugin url="https://github.com/thanhhungpro8x/tomcat-dev-runner">
     <id>fr.thanhhungdoan.tomcatdevrunner</id>
     <name>Dev Runner for Apache Tomcat</name>
     <vendor url="https://www.linkedin.com/in/thanh-hung-doan/">Thanh-Hung DOAN</vendor>

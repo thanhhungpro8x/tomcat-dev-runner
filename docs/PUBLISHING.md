@@ -14,7 +14,7 @@ Official references: [Publishing a Plugin](https://plugins.jetbrains.com/docs/in
 | **Plugin name** | `plugin.xml` `<name>` | Chosen: "Dev Runner for Apache Tomcat" (descriptive use of the Apache Tomcat trademark). |
 | **Vendor** | `plugin.xml` `<vendor>` | Currently `Thanh-Hung DOAN` with the LinkedIn profile as `url`. Optionally add `email="…"` to show a contact address; links must be reachable. |
 | **License** | `LICENSE` + upload form | Mandatory. This repository uses MIT. |
-| **Source code link** | Marketplace admin page | Recommended; the repository must be public. |
+| **Source code link** | Upload form / admin page | Required with an open-source license: https://github.com/thanhhungpro8x/tomcat-dev-runner (public). |
 
 ## 2. Prepare the release
 

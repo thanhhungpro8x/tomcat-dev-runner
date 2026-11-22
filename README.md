@@ -51,6 +51,10 @@ Publishing to JetBrains Marketplace is described in [docs/PUBLISHING.md](docs/PU
 | `hotreload/*` | Compile on save, HotSwap / reload / restart, Angular watch, tool window, settings |
 | `actions/*` | Menu and toolbar actions |
 
+## Source code and issues
+
+<https://github.com/thanhhungpro8x/tomcat-dev-runner> — bug reports and suggestions: <https://github.com/thanhhungpro8x/tomcat-dev-runner/issues>
+
 ## Author
 
 **Thanh-Hung DOAN** — Île-de-France, France
