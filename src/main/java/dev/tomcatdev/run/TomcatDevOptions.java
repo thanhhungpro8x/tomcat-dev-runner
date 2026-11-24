@@ -20,4 +20,8 @@ public final class TomcatDevOptions {
     public boolean startAngularWatch = false;
     /** Disable browser caching of static files (only in the dev CATALINA_BASE, the project is not modified). */
     public boolean disableBrowserCache = true;
+    /** Local configuration folder of the main webapp. Empty → ~/.tomcat-dev/&lt;project&gt;/&lt;app&gt; (used if it exists). */
+    public String localConfigDir = "";
+    /** Additional webapps on the same Tomcat, one per line: "module | /context | local config dir (optional)". */
+    public String extraDeployments = "";
 }

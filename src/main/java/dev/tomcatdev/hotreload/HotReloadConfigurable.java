@@ -42,8 +42,12 @@ public final class HotReloadConfigurable implements Configurable {
         return "Dev Runner for Apache Tomcat";
     }
 
+    private static String code(String v) {
+        return "<code>" + v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</code>";
+    }
+
     private static JComponent hint(String text) {
-        JBLabel l = new JBLabel(text);
+        JBLabel l = new JBLabel("<html>" + text + "</html>");
         l.setComponentStyle(UIUtil.ComponentStyle.SMALL);
         l.setFontColor(UIUtil.FontColor.BRIGHTER);
         return l;
@@ -62,19 +66,27 @@ public final class HotReloadConfigurable implements Configurable {
             if (vf != null) ngDir.setText(vf.getPath());
         });
         ngCmd = new JBTextField();
+        ngCmd.getEmptyText().setText("npx ng build --watch --configuration development");
+        if (ngDir.getTextField() instanceof JBTextField t) t.getEmptyText().setText("Auto-detect");
+        debounce.getEmptyText().setText("500");
 
         JPanel panel = FormBuilder.createFormBuilder()
                 .addComponent(enabled)
                 .addComponent(autoCompile)
                 .addComponent(onlyWhenRunning)
                 .addLabeledComponent("Debounce (ms):", debounce)
+                .addComponentToRightColumn(hint("Waiting time after the last save before compiling, so that quick successive saves give one compilation."))
                 .addLabeledComponent("After compilation:", mode)
-                .addComponentToRightColumn(hint("HotSwap only updates method bodies and needs Debug mode. A context reload picks up new fields/methods/endpoints (2–5 s) and also works in Run mode."))
+                .addComponentToRightColumn(hint("<b>HotSwap</b>: instant, keeps the application state; only method bodies, Debug mode only.<br>"
+                        + "<b>Context reload</b>: 2–5 s, restarts the webapp; any change (new fields, methods, endpoints, beans), Run or Debug."))
                 .addSeparator()
                 .addLabeledComponent("Angular project dir:", ngDir)
-                .addComponentToRightColumn(hint("Empty = find angular.json in the project"))
+                .addComponentToRightColumn(hint("Folder containing " + code("angular.json") + ". Leave empty to search the project."))
                 .addLabeledComponent("Angular watch command:", ngCmd)
-                .addComponentToRightColumn(hint("Tomcat settings (home, server.xml, context.xml, port…) are in Run › Edit Configurations › Tomcat Dev"))
+                .addComponentToRightColumn(hint("Command started by <i>Start Angular Watch</i>, run in the Angular project folder.<br>"
+                        + "Default: " + code("npx ng build --watch --configuration development") + "<br><br>"
+                        + "Tomcat settings (Tomcat home, webapps, server.xml, context.xml, port) are in "
+                        + "<i>Run › Edit Configurations › Tomcat Dev</i>."))
                 .addComponentFillVertically(new JPanel(), 0)
                 .getPanel();
         reset();

@@ -49,11 +49,17 @@ public final class DeploymentResolver {
     // ------------------------------------------------------------------ server.xml
 
     /**
-     * Order: explicit → tomcat*-maven-plugin &lt;serverXml&gt; → &lt;war&gt;/src/main/tomcatconf/server.xml
+     * Order: explicit → ~/.tomcat-dev/&lt;project&gt;/server.xml (local, outside the project)
+     * → tomcat*-maven-plugin &lt;serverXml&gt; → &lt;war&gt;/src/main/tomcatconf/server.xml
      * → &lt;war&gt;/src/main/tomcat/server.xml → CATALINA_HOME/conf/server.xml.
      */
-    public static Path resolveServerXml(TomcatDevOptions o, @Nullable MavenProject war, Path tomcatHome, Consumer<String> log) {
+    public static Path resolveServerXml(TomcatDevOptions o, @Nullable Path projectLocalRoot, @Nullable MavenProject war,
+                                        Path tomcatHome, Consumer<String> log) {
         if (!o.serverXml.isBlank()) return checked(Paths.get(o.serverXml.trim()), "server.xml (configured)", log);
+        if (projectLocalRoot != null) {
+            Path p = projectLocalRoot.resolve("server.xml");
+            if (Files.isRegularFile(p)) return found(p, "local config", log);
+        }
         if (war != null) {
             for (String a : TOMCAT_MVN_PLUGINS) {
                 Path p = pluginPath(war, TOMCAT_MVN_GROUP, a, "serverXml");
@@ -71,16 +77,21 @@ public final class DeploymentResolver {
     // ------------------------------------------------------------------ context.xml
 
     /**
-     * Order (same precedence as Tomcat itself):
-     * explicit → CATALINA_HOME/conf/&lt;Engine&gt;/&lt;Host&gt;/&lt;name&gt;.xml → tomcat*-maven-plugin &lt;contextFile&gt;
+     * Order (same precedence as Tomcat itself, local configuration first):
+     * explicit → &lt;local config&gt;/context.xml → CATALINA_HOME/conf/&lt;Engine&gt;/&lt;Host&gt;/&lt;name&gt;.xml → tomcat*-maven-plugin &lt;contextFile&gt;
      * → maven-war-plugin &lt;containerConfigXML&gt; → target/&lt;finalName&gt;/META-INF/context.xml (filtered) → &lt;webapp&gt;/META-INF/context.xml → src/main/resources/META-INF/context.xml.
      */
-    public static @Nullable Path resolveContextXml(TomcatDevOptions o, @Nullable MavenProject war, @Nullable Path webappDir,
-                                                   Path tomcatHome, Path serverXml, Consumer<String> log) {
-        if (!o.contextXml.isBlank()) return checked(Paths.get(o.contextXml.trim()), "context.xml (configured)", log);
+    public static @Nullable Path resolveContextXml(String explicit, String contextPath, @Nullable Path localDir,
+                                                   @Nullable MavenProject war, @Nullable Path webappDir,
+                                                   Path tomcatHome, Path serverXml, boolean canFilter,
+                                                   Consumer<String> log) {
+        if (explicit != null && !explicit.isBlank()) return checked(Paths.get(explicit.trim()), "context.xml (configured)", log);
+        if (localDir != null && Files.isRegularFile(localDir.resolve("context.xml"))) {
+            return found(localDir.resolve("context.xml"), "local config", log);
+        }
 
         CatalinaBaseWriter.EngineHost eh = CatalinaBaseWriter.engineHost(serverXml);
-        String name = CatalinaBaseWriter.descriptorName(o.contextPath);
+        String name = CatalinaBaseWriter.descriptorName(contextPath);
         Path homeDescriptor = tomcatHome.resolve("conf").resolve(eh.engine()).resolve(eh.host()).resolve(name + ".xml");
         if (Files.isRegularFile(homeDescriptor)) return found(homeDescriptor, "CATALINA_HOME descriptor", log);
 
@@ -92,7 +103,11 @@ public final class DeploymentResolver {
             Path p = pluginPath(war, WAR_GROUP, WAR_PLUGIN, "containerConfigXML");
             if (p != null && Files.isRegularFile(p)) return found(p, "maven-war-plugin <containerConfigXML>", log);
         }
-        // Copy already filtered by Maven (maven-war-plugin webResources) wins over the template in src
+        // The src template is filtered by the plugin when values are available (always up to date).
+        // Otherwise the copy already filtered by Maven (maven-war-plugin webResources) wins over the template in src.
+        if (canFilter && webappDir != null && hasMavenPlaceholders(webappDir.resolve("META-INF").resolve("context.xml"))) {
+            return found(webappDir.resolve("META-INF").resolve("context.xml"), "webapp META-INF template, filtered by the plugin", log);
+        }
         if (war != null && war.getBuildDirectory() != null && war.getFinalName() != null) {
             Path p = Paths.get(war.getBuildDirectory(), war.getFinalName(), "META-INF", "context.xml");
             if (Files.isRegularFile(p) && !hasMavenPlaceholders(p)) return found(p, "filtered: target/" + war.getFinalName(), log);
@@ -117,9 +132,13 @@ public final class DeploymentResolver {
 
     // ------------------------------------------------------------------ deployment
 
-    public static CatalinaBaseWriter.Deployment resolve(@NotNull Project project, @NotNull Module module,
-                                                        @NotNull TomcatDevOptions o, @Nullable Path contextXml,
-                                                        Consumer<String> log) {
+    /** A resolved webapp: what to write for Tomcat + the modules it contains (to reload only affected webapps). */
+    public record ResolvedApp(CatalinaBaseWriter.Deployment deployment, Set<String> moduleNames) {}
+
+    public static ResolvedApp resolve(@NotNull Project project, @NotNull Module module, @NotNull String contextPath,
+                                      @Nullable Path contextXml, @Nullable Path angularDist, @NotNull String angularMount,
+                                      @Nullable Path localDir, @NotNull Map<String, String> filterValues,
+                                      Consumer<String> log) {
         MavenProject war = MavenProjectsManager.getInstance(project).findProject(module);
         Path webappDir = webappDir(module, war);
 
@@ -146,14 +165,127 @@ public final class DeploymentResolver {
         List<Path> jars = libPaths.stream().map(Paths::get).toList();
         log.accept("modules: " + modules.stream().map(Module::getName).toList());
 
-        Path staticDir = null;
-        if (!"-".equals(o.angularDist.trim())) {
-            if (!o.angularDist.isBlank()) staticDir = Paths.get(o.angularDist.trim());
-            else staticDir = AngularLocator.distDir(angularProjectDir(project));
+        List<CatalinaBaseWriter.Overlay> overlays = builtOverlays(war, webappDir, !filterValues.isEmpty(), log);
+        CatalinaBaseWriter.Deployment d = new CatalinaBaseWriter.Deployment(contextPath, webappDir, classDirs, jars,
+                contextXml, angularDist, angularMount, overlays, localDir, filterValues);
+        Set<String> names = new LinkedHashSet<>();
+        for (Module m : modules) names.add(m.getName());
+        return new ResolvedApp(d, names);
+    }
+
+    /** Angular dist for the primary webapp: configured, detected from angular.json, or null ("-"). */
+    public static @Nullable Path angularDist(@NotNull Project project, @NotNull TomcatDevOptions o) {
+        String v = o.angularDist == null ? "" : o.angularDist.trim();
+        if ("-".equals(v)) return null;
+        if (!v.isEmpty()) return Paths.get(v);
+        return AngularLocator.distDir(angularProjectDir(project));
+    }
+
+    // ------------------------------------------------------------------ local configuration outside the project
+
+    /** ~/.tomcat-dev/&lt;project&gt; */
+    public static Path projectLocalRoot(@NotNull Project project) {
+        return Paths.get(System.getProperty("user.home"), ".tomcat-dev", sanitize(project.getName()));
+    }
+
+    /** Configured folder, or ~/.tomcat-dev/&lt;project&gt;/&lt;app&gt; by default (used only if it exists). */
+    public static Path localDir(@NotNull Project project, @Nullable String configured, @NotNull String contextPath) {
+        if (configured != null && !configured.isBlank()) {
+            String c = configured.trim();
+            if (c.startsWith("~/")) c = System.getProperty("user.home") + c.substring(1);
+            return Paths.get(c);
         }
-        List<CatalinaBaseWriter.Overlay> overlays = builtOverlays(war, webappDir, log);
-        return new CatalinaBaseWriter.Deployment(o.contextPath, webappDir, classDirs, jars, contextXml,
-                staticDir, o.angularMount, overlays);
+        return projectLocalRoot(project).resolve(CatalinaBaseWriter.descriptorName(contextPath));
+    }
+
+    /** Result of collecting ${...} values: the values and whether any real source (filter file / env.properties) exists. */
+    public record FilterValues(Map<String, String> values, boolean hasSources) {}
+
+    /**
+     * Values used by the plugin to filter ${...} templates, lowest to highest priority:
+     * pom properties and project.* → Maven filter files of the WAR module (build &lt;filters&gt; and maven-war-plugin
+     * &lt;filters&gt;, for the Maven profiles active in IntelliJ) → &lt;local config&gt;/env.properties.
+     */
+    public static FilterValues filterValues(@Nullable MavenProject war, @Nullable Path localDir, Consumer<String> log) {
+        Map<String, String> values = new LinkedHashMap<>();
+        boolean sources = false;
+        if (war != null) {
+            try {
+                Properties props = war.getProperties();
+                if (props != null) for (String k : props.stringPropertyNames()) values.put(k, props.getProperty(k));
+            } catch (Throwable ignored) {
+            }
+            if (war.getMavenId().getGroupId() != null) values.put("project.groupId", war.getMavenId().getGroupId());
+            if (war.getMavenId().getArtifactId() != null) values.put("project.artifactId", war.getMavenId().getArtifactId());
+            if (war.getMavenId().getVersion() != null) values.put("project.version", war.getMavenId().getVersion());
+            if (war.getFinalName() != null) values.put("project.build.finalName", war.getFinalName());
+            values.put("project.basedir", war.getDirectory());
+            values.put("basedir", war.getDirectory());
+
+            LinkedHashSet<String> filterFiles = new LinkedHashSet<>();
+            try {
+                filterFiles.addAll(war.getFilters());
+            } catch (Throwable ignored) {
+            }
+            try {
+                MavenPlugin warPlugin = war.findPlugin(WAR_GROUP, WAR_PLUGIN);
+                Element cfg = warPlugin == null ? null : warPlugin.getConfigurationElement();
+                Element filters = cfg == null ? null : cfg.getChild("filters");
+                if (filters != null) for (Element f : filters.getChildren("filter")) filterFiles.add(f.getTextTrim());
+            } catch (Throwable ignored) {
+            }
+            for (String f : filterFiles) {
+                String path = f.replace("${project.basedir}", war.getDirectory()).replace("${basedir}", war.getDirectory());
+                if (path.contains("${")) {
+                    log.accept("⚠ Maven filter file not resolved by IntelliJ: " + f);
+                    continue;
+                }
+                Path fp = Paths.get(path);
+                if (!fp.isAbsolute()) fp = Paths.get(war.getDirectory()).resolve(path);
+                if (!Files.isRegularFile(fp)) continue;
+                try {
+                    values.putAll(PlaceholderFilter.load(fp));
+                    sources = true;
+                    log.accept("filter values ← " + fp);
+                } catch (Exception e) {
+                    log.accept("⚠ cannot read " + fp + ": " + e.getMessage());
+                }
+            }
+        }
+        if (localDir != null && Files.isRegularFile(localDir.resolve("env.properties"))) {
+            try {
+                values.putAll(PlaceholderFilter.load(localDir.resolve("env.properties")));
+                sources = true;
+                log.accept("filter values ← " + localDir.resolve("env.properties") + " (local, highest priority)");
+            } catch (Exception e) {
+                log.accept("⚠ cannot read " + localDir.resolve("env.properties") + ": " + e.getMessage());
+            }
+        }
+        return new FilterValues(sources ? values : Map.of(), sources);
+    }
+
+    static String sanitize(String name) {
+        return name.replaceAll("[^A-Za-z0-9._-]", "_");
+    }
+
+    /** One webapp line of the run configuration: "module | /context | local config dir". */
+    public record AppSpec(String moduleName, String contextPath, String localConfigDir) {}
+
+    /** Parses the "additional webapps" text: one webapp per line, "module | /context | local config dir (optional)". */
+    public static List<AppSpec> parseExtraDeployments(@Nullable String text) {
+        List<AppSpec> out = new ArrayList<>();
+        if (text == null) return out;
+        for (String raw : text.split("\\R")) {
+            String line = raw.trim();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            String[] parts = line.split("\\|", -1);
+            String module = parts[0].trim();
+            String ctx = parts.length > 1 && !parts[1].isBlank() ? parts[1].trim() : "/" + module;
+            if (!ctx.startsWith("/")) ctx = "/" + ctx;
+            String dir = parts.length > 2 ? parts[2].trim() : "";
+            if (!module.isEmpty()) out.add(new AppSpec(module, ctx, dir));
+        }
+        return out;
     }
 
     /**
@@ -165,13 +297,13 @@ public final class DeploymentResolver {
      * Unfiltered files are still read from src, so edits show up immediately.
      */
     static List<CatalinaBaseWriter.Overlay> builtOverlays(@Nullable MavenProject war, @Nullable Path webappDir,
-                                                         Consumer<String> log) {
+                                                         boolean pluginFilters, Consumer<String> log) {
         List<CatalinaBaseWriter.Overlay> out = new ArrayList<>();
         if (war == null || war.getBuildDirectory() == null || war.getFinalName() == null) return out;
         Path exploded = Paths.get(war.getBuildDirectory(), war.getFinalName());
         Path webInf = exploded.resolve("WEB-INF");
         if (!Files.isDirectory(webInf)) {
-            if (webappDir != null && hasFilteredTemplates(webappDir.resolve("WEB-INF"))) {
+            if (!pluginFilters && webappDir != null && hasFilteredTemplates(webappDir.resolve("WEB-INF"))) {
                 log.accept("⚠ src/main/webapp/WEB-INF contains ${...} placeholders but " + exploded
                            + " does not exist yet. Run 'mvn package -DskipTests -Dskip.npm -Dskip.installnodenpm' once");
             }

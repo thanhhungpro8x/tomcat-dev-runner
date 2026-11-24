@@ -14,6 +14,7 @@ import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
@@ -42,8 +43,20 @@ public final class CatalinaBaseWriter {
             Path contextXmlSource,        // original context.xml to merge (nullable)
             Path staticDir,               // Angular dist (nullable)
             String staticMount,           // where static files are mounted in the webapp, default "/"
-            List<Overlay> overlays        // built (filtered) files in target/<finalName> overriding the src copies
-    ) {}
+            List<Overlay> overlays,       // built (filtered) files in target/<finalName> overriding the src copies
+            Path localDir,                // per-app configuration folder outside the project (nullable / may not exist)
+            Map<String, String> filterValues // values for ${...} templates (empty → no filtering by the plugin)
+    ) {
+        /** Single-app constructor without local configuration (kept for callers/tests of earlier versions). */
+        public Deployment(String contextPath, Path docBase, List<Path> classDirs, List<Path> jars, Path contextXmlSource,
+                          Path staticDir, String staticMount, List<Overlay> overlays) {
+            this(contextPath, docBase, classDirs, jars, contextXmlSource, staticDir, staticMount, overlays, null, Map.of());
+        }
+
+        public String appName() {
+            return descriptorName(contextPath);
+        }
+    }
 
     /** A file from the exploded WAR used instead of the src/main/webapp copy (e.g. a filtered WEB-INF/web.xml). */
     public record Overlay(Path file, String webAppPath) {}
@@ -68,7 +81,12 @@ public final class CatalinaBaseWriter {
      */
     public static Path write(Path tomcatHome, Path base, Path serverXmlSource, Integer httpPort,
                              Deployment d, Consumer<String> log) throws Exception {
-        return write(tomcatHome, base, serverXmlSource, httpPort, d, true, log);
+        return write(tomcatHome, base, serverXmlSource, httpPort, List.of(d), true, log).get(0);
+    }
+
+    public static Path write(Path tomcatHome, Path base, Path serverXmlSource, Integer httpPort,
+                             Deployment d, boolean disableBrowserCache, Consumer<String> log) throws Exception {
+        return write(tomcatHome, base, serverXmlSource, httpPort, List.of(d), disableBrowserCache, log).get(0);
     }
 
     /**
@@ -76,10 +94,12 @@ public final class CatalinaBaseWriter {
      *                            browsers always revalidate (304 when unchanged), so rebuilt Angular files show up at once.
      *                            The project's own web.xml is not touched.
      */
-    public static Path write(Path tomcatHome, Path base, Path serverXmlSource, Integer httpPort,
-                             Deployment d, boolean disableBrowserCache, Consumer<String> log) throws Exception {
+    public static List<Path> write(Path tomcatHome, Path base, Path serverXmlSource, Integer httpPort,
+                                   List<Deployment> deployments, boolean disableBrowserCache,
+                                   Consumer<String> log) throws Exception {
         Path conf = base.resolve("conf");
         deleteRecursively(conf);
+        deleteRecursively(base.resolve("filtered"));
         for (String dir : new String[]{"conf", "logs", "temp", "webapps", "work"}) {
             Files.createDirectories(base.resolve(dir));
         }
@@ -108,15 +128,23 @@ public final class CatalinaBaseWriter {
         save(server, conf.resolve("server.xml"));
         log.accept("server.xml ← " + serverSrc);
 
-        // 3) context descriptor
-        String name = descriptorName(d.contextPath());
+        // 3) one context descriptor per webapp
         Path hostDir = conf.resolve(eh.engine()).resolve(eh.host());
         Files.createDirectories(hostDir);
-        Path descriptor = hostDir.resolve(name + ".xml");
-        Document ctx = buildContext(d, base, log);
-        save(ctx, descriptor);
-        log.accept("context " + displayPath(d.contextPath()) + " → " + descriptor);
-        return descriptor;
+        List<Path> descriptors = new ArrayList<>();
+        Set<String> names = new HashSet<>();
+        for (Deployment d : deployments) {
+            String name = descriptorName(d.contextPath());
+            if (!names.add(name)) {
+                throw new IllegalArgumentException("Two deployments use the same context path: " + displayPath(d.contextPath()));
+            }
+            Path descriptor = hostDir.resolve(name + ".xml");
+            Document ctx = buildContext(d, base, log);
+            save(ctx, descriptor);
+            log.accept("context " + displayPath(d.contextPath()) + " → " + descriptor);
+            descriptors.add(descriptor);
+        }
+        return descriptors;
     }
 
     // ------------------------------------------------------------------ server.xml
@@ -209,8 +237,19 @@ public final class CatalinaBaseWriter {
 
     static Document buildContext(Deployment d, Path base, Consumer<String> log) throws Exception {
         Document doc;
+        Map<String, String> values = d.filterValues() == null ? Map.of() : d.filterValues();
         if (d.contextXmlSource() != null && Files.isRegularFile(d.contextXmlSource())) {
-            doc = parse(d.contextXmlSource());
+            String text = Files.readString(d.contextXmlSource(), StandardCharsets.UTF_8);
+            Set<String> keys = PlaceholderFilter.placeholders(text);
+            if (!keys.isEmpty() && !values.isEmpty()) {
+                text = PlaceholderFilter.apply(text, values);
+                Set<String> left = PlaceholderFilter.placeholders(text);
+                log.accept("context.xml filtered by the plugin (" + (keys.size() - left.size()) + "/" + keys.size() + " placeholders)"
+                           + (left.isEmpty() ? "" : " — ⚠ unresolved: " + left));
+            } else if (!keys.isEmpty()) {
+                log.accept("⚠ context.xml has unresolved placeholders " + keys + " and no values are available");
+            }
+            doc = parseString(text);
             if (!"Context".equals(doc.getDocumentElement().getTagName())) {
                 throw new IllegalArgumentException("The root element of " + d.contextXmlSource() + " is not <Context>");
             }
@@ -240,11 +279,40 @@ public final class CatalinaBaseWriter {
         res.setAttribute("cachingAllowed", "false");
 
         // PreResources: the first declared entry wins when paths overlap.
-        // 1) built files from target (filtered web.xml…) have the highest priority
+        Set<String> mountedFiles = new HashSet<>();
+        Path filteredRoot = base.resolve("filtered").resolve(d.appName());
+
+        // 1) local configuration outside the project (highest priority)
+        Path local = d.localDir();
+        if (local != null && Files.isDirectory(local)) {
+            log.accept("local config ← " + local);
+            Path localWebapp = local.resolve("webapp");
+            Path localClasses = local.resolve("classes");
+            // templates in the local folder are filtered too; filtered copies are mounted file by file
+            mountFilteredTemplates(doc, res, localWebapp, "/", filteredRoot.resolve("local-webapp"), values, mountedFiles, "local", log);
+            mountFilteredTemplates(doc, res, localClasses, "/WEB-INF/classes/", filteredRoot.resolve("local-classes"), values, mountedFiles, "local", log);
+            if (Files.isDirectory(localWebapp)) {
+                res.appendChild(resourceSet(doc, "PreResources", "DirResourceSet", localWebapp, "/"));
+                log.accept("local webapp / ← " + localWebapp);
+            }
+            if (Files.isDirectory(localClasses)) {
+                res.appendChild(resourceSet(doc, "PreResources", "DirResourceSet", localClasses, "/WEB-INF/classes"));
+                log.accept("local classes /WEB-INF/classes ← " + localClasses);
+            }
+        }
+
+        // 2) templates from src/main/webapp/WEB-INF filtered by the plugin (fresh, no Maven run needed)
+        Path srcWebInf = d.docBase() == null ? null : d.docBase().resolve("WEB-INF");
+        if (!values.isEmpty() && srcWebInf != null && Files.isDirectory(srcWebInf)) {
+            mountFilteredTemplates(doc, res, srcWebInf, "/WEB-INF/", filteredRoot.resolve("webapp/WEB-INF"), values, mountedFiles, "src", log);
+        }
+
+        // 3) built files from target/<finalName> (Maven-filtered or generated), unless already provided above
         if (d.overlays() != null) {
             for (Overlay o : d.overlays()) {
-                if (!Files.isRegularFile(o.file())) continue;
+                if (!Files.isRegularFile(o.file()) || mountedFiles.contains(o.webAppPath())) continue;
                 res.appendChild(resourceSet(doc, "PreResources", "FileResourceSet", o.file(), o.webAppPath()));
+                mountedFiles.add(o.webAppPath());
                 log.accept("using built file: " + o.webAppPath() + " ← " + o.file());
             }
         }
@@ -268,7 +336,17 @@ public final class CatalinaBaseWriter {
         }
         Set<String> used = new HashSet<>();
         int jars = 0, skipped = 0;
-        for (Path jar : d.jars()) {
+        List<Path> allJars = new ArrayList<>();
+        if (local != null && Files.isDirectory(local.resolve("lib"))) {
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(local.resolve("lib"), "*.jar")) {
+                for (Path j : ds) {
+                    allJars.add(j);
+                    log.accept("local lib ← " + j.getFileName());
+                }
+            }
+        }
+        allJars.addAll(d.jars());
+        for (Path jar : allJars) {
             String fn = jar.getFileName().toString();
             if (!Files.isRegularFile(jar) || !fn.endsWith(".jar")) continue;
             if (isContainerJar(fn)) {
@@ -282,6 +360,38 @@ public final class CatalinaBaseWriter {
         }
         log.accept("mount: " + dirs + " classes folders, " + jars + " jars" + (skipped > 0 ? " (" + skipped + " container jars skipped)" : ""));
         return doc;
+    }
+
+    /**
+     * For every filterable file under {@code root} that contains ${...} placeholders resolvable with {@code values}:
+     * writes a filtered copy under {@code outRoot} and mounts it at {@code mountPrefix + relative path}.
+     * WEB-INF/classes and WEB-INF/lib below a webapp root are skipped.
+     */
+    private static void mountFilteredTemplates(Document doc, Element res, Path root, String mountPrefix, Path outRoot,
+                                               Map<String, String> values, Set<String> mountedFiles, String origin,
+                                               Consumer<String> log) throws IOException {
+        if (root == null || !Files.isDirectory(root) || values.isEmpty()) return;
+        List<Path> files;
+        try (var st = Files.walk(root)) {
+            files = st.filter(Files::isRegularFile).filter(PlaceholderFilter::isFilterable).sorted().toList();
+        }
+        for (Path f : files) {
+            String rel = root.relativize(f).toString().replace('\\', '/');
+            String mount = mountPrefix + rel;
+            if (mount.startsWith("/WEB-INF/lib/") || (mountPrefix.equals("/WEB-INF/") && (rel.startsWith("classes/") || rel.startsWith("lib/")))
+                || mountedFiles.contains(mount)) continue;
+            String text = Files.readString(f, StandardCharsets.UTF_8);
+            Set<String> keys = PlaceholderFilter.placeholders(text);
+            if (keys.isEmpty()) continue;
+            String filtered = PlaceholderFilter.apply(text, values);
+            Set<String> left = PlaceholderFilter.placeholders(filtered);
+            Path out = outRoot.resolve(rel);
+            Files.createDirectories(out.getParent());
+            Files.writeString(out, filtered, StandardCharsets.UTF_8);
+            res.appendChild(resourceSet(doc, "PreResources", "FileResourceSet", out, mount));
+            mountedFiles.add(mount);
+            log.accept("filtered (" + origin + ") " + mount + (left.isEmpty() ? "" : " — ⚠ unresolved: " + left));
+        }
     }
 
     private static Element resourceSet(Document doc, String tag, String cls, Path base, String mount) {
@@ -325,6 +435,10 @@ public final class CatalinaBaseWriter {
 
     static Document parse(Path p) throws Exception {
         return builder().parse(p.toFile());
+    }
+
+    static Document parseString(String xml) throws Exception {
+        return builder().parse(new org.xml.sax.InputSource(new java.io.StringReader(xml)));
     }
 
     static Document newDocument() throws Exception {

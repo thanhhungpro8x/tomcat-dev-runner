@@ -27,9 +27,27 @@
           (CATALINA_HOME, tomcat-maven-plugin, maven-war-plugin, META-INF) and can be overridden.</li>
       <li>Existing JNDI resources and parameters in <code>context.xml</code> are preserved.</li>
     </ul>
+    <b>Local configuration outside the project</b>
+    <ul>
+      <li>Per-webapp folder <code>~/.tomcat-dev/&lt;project&gt;/&lt;app&gt;</code>: <code>env.properties</code>,
+          <code>context.xml</code>, <code>webapp/</code>, <code>classes/</code>, <code>lib/</code> override the project's files
+          without modifying them, so local database URLs, ports or credentials are never committed.</li>
+      <li><code>${...}</code> templates (context.xml, web.xml, …) are filtered by the plugin with the Maven filter files and
+          the local <code>env.properties</code>: no Maven build needed.</li>
+      <li>Several WAR modules on one Tomcat; only the webapps containing changed modules are reloaded.</li>
+    </ul>
     ]]></description>
 
     <change-notes><![CDATA[
+    <b>2.3.0</b>
+    <ul>
+      <li>Local configuration folder outside the project per webapp (env.properties, context.xml, webapp/, classes/, lib/)
+          and a project-level server.xml; <i>Create Local Config</i> action creates env.properties.</li>
+      <li>The plugin filters ${...} templates itself (Maven filter files + local env.properties); no Maven build needed.</li>
+      <li>Several WAR modules on one Tomcat; context reload limited to the webapps containing changed modules.</li>
+      <li>Clearer run configuration form: defaults shown inside empty fields, examples on separate lines,
+          home folder paths shown as <code>~/</code> in the form and the log.</li>
+    </ul>
     <b>2.2.0</b>
     <ul>
       <li>Renamed to Dev Runner for Apache Tomcat; English user interface and documentation.</li>
@@ -73,6 +91,9 @@
             <action id="TomcatDev.Reload" class="dev.tomcatdev.actions.ReloadContextAction" text="Reload Context"
                     description="Reload the webapp (new classes, fields, methods) without restarting Tomcat"/>
             <action id="TomcatDev.Restart" class="dev.tomcatdev.actions.RestartTomcatAction" text="Restart Tomcat"/>
+            <action id="TomcatDev.CreateLocalConfig" class="dev.tomcatdev.actions.CreateLocalConfigAction"
+                    text="Create Local Config"
+                    description="Create env.properties outside the project to override ${...} values locally"/>
             <action id="TomcatDev.OpenBase" class="dev.tomcatdev.actions.OpenCatalinaBaseAction"
                     text="Open Generated CATALINA_BASE"/>
             <separator/>

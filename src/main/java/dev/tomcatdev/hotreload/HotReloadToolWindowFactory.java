@@ -20,7 +20,7 @@ import org.jetbrains.annotations.NotNull;
 public final class HotReloadToolWindowFactory implements ToolWindowFactory, DumbAware {
 
     private static final String[] ACTIONS = {
-            "TomcatDev.Toggle", "TomcatDev.OpenBase",
+            "TomcatDev.Toggle", "TomcatDev.CreateLocalConfig", "TomcatDev.OpenBase",
             "TomcatDev.AngularStart", "TomcatDev.AngularStop", "TomcatDev.Reload", "TomcatDev.Restart"
     };
 

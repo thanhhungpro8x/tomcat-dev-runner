@@ -14,6 +14,11 @@ import org.jdom.Element;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 /**
  * Being a ModuleRunProfile, the IDE adds a "Build" step before launch and enables both Run and Debug
  * (DefaultJavaProgramRunner / GenericDebuggerRunner), because the state is a JavaCommandLineState.
@@ -35,10 +40,18 @@ public final class TomcatDevRunConfiguration extends RunConfigurationBase<Object
         return ModuleManager.getInstance(getProject()).findModuleByName(options.moduleName);
     }
 
+    /** All modules deployed by this configuration: the main WAR module and the additional webapps. */
     @Override
     public @NotNull Module[] getModules() {
+        List<Module> out = new ArrayList<>();
         Module m = module();
-        return m == null ? Module.EMPTY_ARRAY : new Module[]{m};
+        if (m != null) out.add(m);
+        ModuleManager mm = ModuleManager.getInstance(getProject());
+        for (DeploymentResolver.AppSpec spec : DeploymentResolver.parseExtraDeployments(options.extraDeployments)) {
+            Module x = mm.findModuleByName(spec.moduleName());
+            if (x != null && !out.contains(x)) out.add(x);
+        }
+        return out.toArray(Module.EMPTY_ARRAY);
     }
 
     @Override
@@ -53,6 +66,17 @@ public final class TomcatDevRunConfiguration extends RunConfigurationBase<Object
             throw new RuntimeConfigurationError(options.tomcatHome.isBlank()
                     ? "No Tomcat installation found automatically. Please set Tomcat home"
                     : "Invalid Tomcat home (bin/bootstrap.jar or lib/catalina.jar is missing)");
+        }
+        Set<String> paths = new HashSet<>();
+        paths.add(CatalinaBaseWriter.descriptorName(options.contextPath));
+        ModuleManager mm = ModuleManager.getInstance(getProject());
+        for (DeploymentResolver.AppSpec spec : DeploymentResolver.parseExtraDeployments(options.extraDeployments)) {
+            if (mm.findModuleByName(spec.moduleName()) == null) {
+                throw new RuntimeConfigurationError("Additional webapp: module '" + spec.moduleName() + "' not found");
+            }
+            if (!paths.add(CatalinaBaseWriter.descriptorName(spec.contextPath()))) {
+                throw new RuntimeConfigurationError("Context path " + spec.contextPath() + " is used twice");
+            }
         }
         if (!options.httpPort.isBlank()) {
             try {

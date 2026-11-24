@@ -24,6 +24,8 @@ IntelliJ IDEA, and requires **no changes to your project**.
 13. [Troubleshooting](#13-troubleshooting)
 14. [Limitations](#14-limitations)
 15. [Security notes](#15-security-notes)
+16. [Local configuration outside the project](#16-local-configuration-outside-the-project)
+17. [Several webapps on one Tomcat](#17-several-webapps-on-one-tomcat)
 
 ---
 
@@ -98,7 +100,7 @@ the plugin works normally. Choose a "do not update" option, or install from Mark
    [section 10](#10-projects-that-use-maven-resource-filtering).)
 2. **Create a run configuration:** *Run › Edit Configurations… › + › Tomcat Dev*.
    - *Tomcat home* — leave empty if the information line underneath shows an auto-detected Tomcat; otherwise browse to it.
-   - *Module WAR* — preselected when the project has a module with `war` packaging.
+   - *WAR module* — preselected when the project has a module with `war` packaging.
    - *Context path* — for example `/my-app`, or `/` for the root context.
    - Leave all other fields empty.
 3. **Start it with Debug** (the bug icon). Debug is required for HotSwap; context reload works in Run mode as well.
@@ -126,17 +128,19 @@ the plugin works normally. Choose a "do not update" option, or install from Mark
 | Field | Default | Description |
 |---|---|---|
 | **Tomcat home** | auto-detect | Tomcat installation folder (contains `bin/bootstrap.jar` and `lib/catalina.jar`). The line underneath shows the detected version. |
-| **Module WAR** | first `war` module | The IntelliJ module to deploy. Its jar module dependencies are added automatically. |
+| **WAR module** | first `war` module | The IntelliJ module to deploy. Its jar module dependencies are added automatically. |
 | **Context path** | `/` | Web context path, for example `/my-app`. `/` deploys as `ROOT`. |
 | **HTTP port** | from `server.xml` | Overrides the port of the first non-SSL HTTP connector. |
 | **server.xml** | auto-detect | Template `server.xml`. See [7.3](#73-how-serverxml-is-found). |
 | **context.xml** | auto-detect | Webapp context descriptor to merge. See [7.4](#74-how-contextxml-is-found). |
 | **Alternative JRE** | module SDK | JDK/JRE used to run Tomcat. Point it to a JetBrains Runtime for enhanced HotSwap. |
 | **VM options** | — | Extra JVM options for Tomcat, for example `-Xmx2g -Dspring.profiles.active=dev`. |
-| **Environment** | — | Environment variables, `KEY=VALUE;KEY2=VALUE2`. The IDE environment is inherited. |
-| **Angular dist** | from `angular.json` | Folder containing the built Angular files. `-` disables the Angular mount. |
+| **Environment variables** | — | Environment variables, `KEY=VALUE;KEY2=VALUE2`. The IDE environment is inherited. |
+| **Angular dist folder** | from `angular.json` | Folder containing the built Angular files. `-` disables the Angular mount. |
 | **Mount Angular at** | `/` | Path inside the webapp where Angular files are served. |
-| **Start Angular watch together with Tomcat** | off | Starts the Angular watch command (see [6](#6-project-settings-reference)) on every launch. |
+| **Local config folder** | `~/.tomcat-dev/<project>/<app>` | Folder outside the project overriding this webapp's configuration (used if it exists). See [16](#16-local-configuration-outside-the-project). |
+| **Additional webapps** | — | More WAR modules on the same Tomcat, one per line: `module | /context | local config dir`. See [17](#17-several-webapps-on-one-tomcat). |
+| **Start the Angular watch build together with Tomcat** | off | Starts the Angular watch command (see [6](#6-project-settings-reference)) on every launch. |
 | **Disable browser caching of static files** | on | Adds a no-cache filter to the development Tomcat. See [9.3](#93-browser-caching). |
 
 **Before launch.** New configurations get the standard *Build* step, which compiles the modules before Tomcat starts.
@@ -246,10 +250,11 @@ The file `conf/Catalina/localhost/<name>.xml` is built from your own `context.xm
 
 When the *server.xml* field is empty, the first match wins:
 
-1. `<serverXml>` of `tomcat7-maven-plugin` / `tomcat8-maven-plugin` in the WAR module's `pom.xml`
-2. `<war-module>/src/main/tomcatconf/server.xml`
-3. `<war-module>/src/main/tomcat/server.xml`
-4. `CATALINA_HOME/conf/server.xml`, the installation's own file, including any `GlobalNamingResources` you configured there
+1. `~/.tomcat-dev/<project>/server.xml` — local file outside the project (see [16](#16-local-configuration-outside-the-project))
+2. `<serverXml>` of `tomcat7-maven-plugin` / `tomcat8-maven-plugin` in the WAR module's `pom.xml`
+3. `<war-module>/src/main/tomcatconf/server.xml`
+4. `<war-module>/src/main/tomcat/server.xml`
+5. `CATALINA_HOME/conf/server.xml`, the installation's own file, including any `GlobalNamingResources` you configured there
 
 The plugin then patches the copy:
 
@@ -264,12 +269,14 @@ remain on the common classpath.
 
 When the *context.xml* field is empty, the first match wins. The order follows Tomcat's own precedence:
 
-1. `CATALINA_HOME/conf/<Engine>/<Host>/<name>.xml` — a descriptor already deployed in your Tomcat for this context
-2. `<contextFile>` of `tomcat7/8-maven-plugin`
-3. `<containerConfigXML>` of `maven-war-plugin`
-4. `target/<finalName>/META-INF/context.xml` — **the copy filtered by Maven**, if it contains no unresolved `${…}`
-5. `src/main/webapp/META-INF/context.xml` — a warning is logged if it still contains Maven placeholders
-6. `src/main/resources/META-INF/context.xml`
+1. `<local config>/context.xml` — outside the project (see [16](#16-local-configuration-outside-the-project))
+2. `CATALINA_HOME/conf/<Engine>/<Host>/<name>.xml` — a descriptor already deployed in your Tomcat for this context
+3. `<contextFile>` of `tomcat7/8-maven-plugin`
+4. `<containerConfigXML>` of `maven-war-plugin`
+5. `src/main/webapp/META-INF/context.xml` **filtered by the plugin**, when filter values are available (see [16.3](#163-placeholder-filtering-by-the-plugin))
+6. `target/<finalName>/META-INF/context.xml` — the copy filtered by Maven, if it contains no unresolved `${…}`
+7. `src/main/webapp/META-INF/context.xml` as is — a warning is logged if it still contains placeholders
+8. `src/main/resources/META-INF/context.xml`
 
 `${catalina.*}`, `${java.*}`, `${user.*}` and `${os.*}` are not treated as Maven placeholders, because Tomcat
 resolves them itself.
@@ -469,6 +476,7 @@ Angular watch output. The toolbar contains the actions below.
 | Enable Hot Reload | Toggles compile-on-save and reloading for the project |
 | Reload Context | Reloads the running webapp now (JMX) |
 | Restart Tomcat | Restarts the running Tomcat Dev configuration (runs *Before launch* steps) |
+| Create Local Config | Creates `env.properties` outside the project for each webapp of the selected Tomcat Dev configuration (see [16.4](#164-create-local-config)) |
 | Open Generated CATALINA_BASE | Opens the generated configuration folder (`conf`, `logs`) |
 | Start / Stop Angular Watch | Runs or stops the Angular watch command |
 
@@ -501,7 +509,6 @@ The generated configuration and Tomcat's own log files are in the folder opened 
 
 ## 14. Limitations
 
-- One WAR module per run configuration. Create several configurations with different ports to run several webapps.
 - WAR overlays (dependencies of type `war`) are not merged.
 - Non-Maven projects work for classes and libraries; `src/main/webapp` is located from the module content root, and
   Maven-specific detection (plugin configuration, filtered files) is skipped.
@@ -518,6 +525,97 @@ The generated configuration and Tomcat's own log files are in the folder opened 
   intended for local development only; never use the generated configuration on a shared or production server.
 - The no-cache filter and the disabled shutdown port only exist in the generated development `CATALINA_BASE`.
 - The plugin does not send data anywhere and makes no network requests.
+
+---
+
+## 16. Local configuration outside the project
+
+Developers often need machine-specific settings: a local database, Elasticsearch on another port, test credentials.
+Editing them in the project risks committing them. The plugin can take these settings from a folder **outside the
+project**, per webapp, with the highest priority. Nothing in the project changes.
+
+### 16.1 Layout
+
+```
+~/.tomcat-dev/<project>/
+├── server.xml                  optional, replaces CATALINA_HOME/conf/server.xml for all webapps of the project
+└── <app>/                      one folder per webapp; <app> = context path without "/" (ROOT for "/")
+    ├── env.properties          values for ${...} placeholders (highest priority)
+    ├── context.xml             replaces the project's context.xml
+    ├── webapp/                 files on top of the webapp root, e.g. webapp/WEB-INF/web.xml
+    ├── classes/                files on top of /WEB-INF/classes, e.g. application-local.yml, logback.xml
+    └── lib/                    extra jars for /WEB-INF/lib, e.g. a JDBC driver
+```
+
+The folder is used only if it exists. Another location can be set in the *Local config folder* field of the run configuration
+(or in the third column of an additional webapp line). `<project>` is the IntelliJ project name.
+
+### 16.2 Priority
+
+For any file of the webapp, the first source that provides it wins:
+
+1. local `webapp/`, `classes/` (filtered copies of files with placeholders first)
+2. `src/main/webapp/WEB-INF` templates filtered by the plugin
+3. built files from `target/<finalName>/WEB-INF`
+4. Angular output, module classes, `src/main/webapp`, libraries (local `lib/` jars first)
+
+The context descriptor uses the local `context.xml` if present (see [7.4](#74-how-contextxml-is-found)).
+
+### 16.3 Placeholder filtering by the plugin
+
+Templates containing Maven-style `${key}` placeholders — `META-INF/context.xml`, files under `WEB-INF` (except
+`classes/` and `lib/`), and text files in the local `webapp/` and `classes/` folders — are filtered by the plugin at
+launch. Values, from lowest to highest priority:
+
+1. pom properties and `project.groupId`, `project.artifactId`, `project.version`, `project.build.finalName`, `project.basedir`
+2. the WAR module's Maven filter files: `<build><filters>` and `maven-war-plugin` `<filters>`, for the Maven profiles
+   active in IntelliJ's Maven tool window
+3. `<local config>/env.properties`
+
+Filtering by the plugin is used only when a filter file or a local `env.properties` exists; otherwise the behaviour of
+[section 10](#10-projects-that-use-maven-resource-filtering) applies (copies filtered by Maven). `${catalina.*}`,
+`${java.*}`, `${user.*}`, `${os.*}` and `${env.*}` are left for Tomcat. Unresolved placeholders are reported in the log.
+Filtered copies are written to `CATALINA_BASE/filtered/<app>/` at each launch.
+
+### 16.4 Create Local Config
+
+*Tools › Dev Runner for Apache Tomcat › Create Local Config* (also in the tool window toolbar) creates
+`<local config folder>/env.properties` for each webapp of the selected Tomcat Dev configuration and opens the folder.
+The file lists every placeholder used by the project's `context.xml` and `WEB-INF` templates, with the current values
+from the Maven filter files, ready to edit. An existing `env.properties` is never overwritten.
+
+Only this file is created. Add `context.xml`, `webapp/`, `classes/`, `lib/` or `../server.xml` yourself when you need
+them (see [16.1](#161-layout)); a good start for `context.xml` is a copy of the project's
+`src/main/webapp/META-INF/context.xml`.
+
+### 16.5 When changes apply
+
+| Change | Applied by |
+|---|---|
+| `env.properties`, local `context.xml`, `server.xml`, files with placeholders | Restart (they are processed at launch) |
+| Other files in local `webapp/` | Immediately |
+| Other files in local `classes/` | Context reload (the application reads them at startup) |
+| Jars in local `lib/` | Restart |
+
+---
+
+## 17. Several webapps on one Tomcat
+
+Add more WAR modules in **Additional webapps**, one per line:
+
+```
+admin-web   | /admin
+reports-web | /reports | ~/configs/reports-local
+```
+
+Columns: IntelliJ module name, context path (default `/<module>`), local configuration folder (default
+`~/.tomcat-dev/<project>/<app>`). Lines starting with `#` are ignored. Each webapp gets its own context descriptor,
+its own modules and libraries, and its own local configuration; context paths must be unique.
+
+The *Build* step before launch compiles all modules of all webapps. After a compilation, only the webapps that contain
+a changed module are reloaded: a change in a module used only by `/admin` reloads `/admin`; a change in a shared jar
+module reloads every webapp using it. *Reload Context* in the toolbar reloads all webapps. The Angular mount applies
+to the main webapp only.
 
 ---
 

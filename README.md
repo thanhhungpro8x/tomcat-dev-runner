@@ -12,6 +12,10 @@ to your project.
   (CATALINA_HOME, tomcat-maven-plugin, maven-war-plugin, META-INF). Maven-filtered files are taken from
   `target/<finalName>`. JNDI resources and parameters are preserved.
 - **Angular friendly.** Start `ng build --watch` from the IDE; browser caching is disabled in the development Tomcat.
+- **Local configuration outside the project.** `~/.tomcat-dev/<project>/<app>/` (`env.properties`, `context.xml`,
+  `webapp/`, `classes/`, `lib/`) overrides the project's settings without editing it, so local URLs, ports and
+  credentials are never committed. The plugin filters `${...}` templates itself; no Maven build needed.
+- **Several webapps on one Tomcat**, each reloaded only when its own modules change.
 
 ## Quick start
 

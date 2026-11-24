@@ -17,6 +17,6 @@ public final class CompileFinishedListener implements CompilationStatusListener 
     @Override
     public void compilationFinished(boolean aborted, int errors, int warnings, @NotNull CompileContext context) {
         if (aborted || project.isDisposed() || context.getProject() != project) return;
-        HotReloadService.getInstance(project).onCompilationFinished(errors);
+        HotReloadService.getInstance(project).onCompilationFinished(errors, context.getCompileScope().getAffectedModules());
     }
 }

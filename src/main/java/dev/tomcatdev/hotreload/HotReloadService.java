@@ -129,8 +129,12 @@ public final class HotReloadService implements Disposable {
         cm.make(scope, null);
     }
 
-    public void onCompilationFinished(int errors) {
+    /** Modules compiled since the last reload; used to reload only the webapps that contain them. */
+    private final Set<String> dirtyModules = ConcurrentHashMap.newKeySet();
+
+    public void onCompilationFinished(int errors, @NotNull Module[] affected) {
         if (!s().enabled) return;
+        for (Module m : affected) dirtyModules.add(m.getName());
         if (errors > 0) {
             warn("Compilation failed (" + errors + " errors) — nothing reloaded.");
             return;
@@ -154,7 +158,7 @@ public final class HotReloadService implements Disposable {
         if (findTomcatDescriptor() == null && sessions.isEmpty()) return;
 
         if (HotReloadSettings.MODE_RELOAD.equals(mode)) {
-            reloadContext();
+            reloadChangedContexts();
             return;
         }
         if (sessions.isEmpty()) {
@@ -164,6 +168,7 @@ public final class HotReloadService implements Disposable {
         for (DebuggerSession session : sessions) {
             HotSwapUI.getInstance(project).reloadChangedClasses(session, false, new HotSwapStatusListener() {
                 public void onSuccess(List<DebuggerSession> list) {
+                    dirtyModules.clear();
                     log("HotSwap OK ✔");
                 }
 
@@ -186,7 +191,7 @@ public final class HotReloadService implements Disposable {
         String mode = s().classChangeMode;
         if (HotReloadSettings.MODE_HOTSWAP_RELOAD.equals(mode)) {
             log(reason + " → reloading the context.");
-            reloadContext();
+            reloadChangedContexts();
         } else if (HotReloadSettings.MODE_HOTSWAP_RESTART.equals(mode)) {
             warn(reason + " → restart Tomcat.");
             restartTomcat();
@@ -197,19 +202,32 @@ public final class HotReloadService implements Disposable {
 
     // ================================================================== reload context (JMX)
 
-    private record TomcatInfo(int jmxPort, String contextPath) {}
+    /** A webapp deployed by a running Tomcat Dev configuration and the IntelliJ modules it contains. */
+    public record AppInfo(String contextPath, Set<String> moduleNames) {}
+
+    private record TomcatInfo(int jmxPort, List<AppInfo> apps) {}
 
     private final Map<String, TomcatInfo> tomcats = new ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicBoolean reloading = new java.util.concurrent.atomic.AtomicBoolean();
     private volatile boolean reloadAgain;
+    private volatile boolean reloadAgainAll;
 
-    /** Called by TomcatDevState at launch: remembers the JMX port of this configuration. */
-    public void registerTomcat(String configName, int jmxPort, String contextPath) {
-        tomcats.put(configName, new TomcatInfo(jmxPort, contextPath));
+    /** Called by TomcatDevState at launch: remembers the JMX port and the webapps of this configuration. */
+    public void registerTomcat(String configName, int jmxPort, List<AppInfo> apps) {
+        tomcats.put(configName, new TomcatInfo(jmxPort, List.copyOf(apps)));
     }
 
-    /** Reloads the context of the running Tomcat Dev: same JVM, new classloader, Spring restarts. */
+    /** Reloads every webapp of the running Tomcat Dev (toolbar / menu action). */
     public void reloadContext() {
+        reloadContexts(true);
+    }
+
+    /** Reloads only the webapps containing modules compiled since the last reload (all of them if unknown). */
+    public void reloadChangedContexts() {
+        reloadContexts(false);
+    }
+
+    private void reloadContexts(boolean all) {
         ApplicationManager.getApplication().invokeLater(() -> {
             RunContentDescriptor d = findTomcatDescriptor();
             if (d == null) {
@@ -224,21 +242,39 @@ public final class HotReloadService implements Disposable {
             }
             if (!reloading.compareAndSet(false, true)) {
                 reloadAgain = true;   // reload in progress: fold the new compilation into one more reload
+                reloadAgainAll |= all;
                 return;
             }
+            Set<String> changed = new HashSet<>(dirtyModules);
+            dirtyModules.clear();
+            List<AppInfo> targets = new ArrayList<>();
+            for (AppInfo app : info.apps()) {
+                if (all || changed.isEmpty() || !Collections.disjoint(app.moduleNames(), changed)) targets.add(app);
+            }
+            if (targets.isEmpty()) targets.addAll(info.apps());
             ApplicationManager.getApplication().executeOnPooledThread(() -> {
-                long t = System.currentTimeMillis();
                 try {
-                    log("Reloading context " + displayPath(info.contextPath()) + "…");
-                    dev.tomcatdev.run.TomcatContextReloader.reload(info.jmxPort(), info.contextPath());
-                    log("Context reloaded in " + (System.currentTimeMillis() - t) + " ms ✔");
-                } catch (Exception e) {
-                    notifyWithRestart("Context reload failed: " + e.getMessage());
+                    for (AppInfo app : targets) {
+                        long t = System.currentTimeMillis();
+                        try {
+                            log("Reloading context " + displayPath(app.contextPath()) + "…");
+                            dev.tomcatdev.run.TomcatContextReloader.reload(info.jmxPort(), app.contextPath());
+                            log("Context " + displayPath(app.contextPath()) + " reloaded in " + (System.currentTimeMillis() - t) + " ms ✔");
+                        } catch (Exception e) {
+                            notifyWithRestart("Context reload failed for " + displayPath(app.contextPath()) + ": " + e.getMessage());
+                        }
+                    }
+                    if (targets.size() < info.apps().size()) {
+                        log("Not reloaded (no changed module): " + info.apps().stream().filter(a -> !targets.contains(a))
+                                .map(a -> displayPath(a.contextPath())).toList());
+                    }
                 } finally {
                     reloading.set(false);
                     if (reloadAgain) {
+                        boolean again = reloadAgainAll;
                         reloadAgain = false;
-                        reloadContext();
+                        reloadAgainAll = false;
+                        reloadContexts(again);
                     }
                 }
             });
@@ -371,8 +407,15 @@ public final class HotReloadService implements Disposable {
         print(msg, true);
     }
 
+    private static final String HOME = System.getProperty("user.home", "");
+
+    /** Paths under the user's home are logged as ~/… (no personal paths in screenshots). */
+    private static String tilde(String msg) {
+        return HOME.length() > 1 ? msg.replace(HOME + "/", "~/").replace(HOME + "\\", "~\\") : msg;
+    }
+
     private synchronized void print(String msg, boolean error) {
-        String line = LocalTime.now().format(TS) + "  " + msg;
+        String line = LocalTime.now().format(TS) + "  " + tilde(msg);
         buffer.addLast(new String[]{line, error ? "1" : "0"});
         while (buffer.size() > 1000) buffer.removeFirst();
         ConsoleView c = console;
