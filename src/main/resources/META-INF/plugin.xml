@@ -39,6 +39,24 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    <b>2.3.1</b>
+    <ul>
+      <li>Fix: resources that the WAR build copies into WEB-INF/classes with maven-war-plugin webResources
+          (application.properties, logback.xml, …) and that are not in target/classes are now on the classpath.</li>
+      <li>Fix: resource sets in context.xml, server.xml or the global conf/context.xml that point to a missing file
+          (e.g. an old jar version in ~/.m2) are ignored with a warning instead of stopping Tomcat.</li>
+      <li>Fix: a META-INF/context.xml copied into the WAR by maven-war-plugin webResources is now used instead of the
+          one in src/main/webapp (its Parameter and Environment entries were missing).</li>
+      <li>Fix: a conf/web.xml in Tomcat home that already contains the no-cache filter no longer stops the webapps.</li>
+      <li>Fix: server.xml and context.xml split into several files with XML entity includes are fully used
+          (included parts were dropped). conf/&lt;Engine&gt;/&lt;Host&gt;/context.xml.default is copied too.</li>
+      <li>No deprecated API usages anymore (ReadAction.run, XDebugSession.getRunContentDescriptor).</li>
+      <li>Fix: structural class changes (new field, record component, method, lambda…) are detected from the compiled
+          classes and reload the context. IntelliJ could report such a HotSwap as successful, leaving old and new classes
+          mixed (NoSuchMethodError).</li>
+      <li>With the Angular watch on, a warning is logged when the Before-launch Maven goal would rebuild the front end
+          or clean; the form shows the recommended goal (package -DskipTests -Dskip.npm -Dskip.installnodenpm).</li>
+    </ul>
     <b>2.3.0</b>
     <ul>
       <li>Local configuration folder outside the project per webapp (env.properties, context.xml, webapp/, classes/, lib/)

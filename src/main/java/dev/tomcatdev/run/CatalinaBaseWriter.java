@@ -115,6 +115,13 @@ public final class CatalinaBaseWriter {
             }
         }
 
+        // resource sets in the global context.xml that point to missing files would stop every webapp
+        Path globalCtx = conf.resolve("context.xml");
+        if (Files.isRegularFile(globalCtx)) {
+            Document g = parse(globalCtx);
+            if (removeMissingResourceSets(g, "conf/context.xml", log)) save(g, globalCtx);
+        }
+
         if (disableBrowserCache && Files.isRegularFile(conf.resolve("web.xml"))) {
             addNoCacheFilter(conf.resolve("web.xml"));
             log.accept("browser cache: disabled for development (ExpiresFilter in the CATALINA_BASE conf/web.xml)");
@@ -124,6 +131,7 @@ public final class CatalinaBaseWriter {
         Path serverSrc = serverXmlSource != null ? serverXmlSource : homeConf.resolve("server.xml");
         Document server = parse(serverSrc);
         patchServer(server, httpPort, log);
+        removeMissingResourceSets(server, "server.xml", log);
         EngineHost eh = engineHost(server);
         save(server, conf.resolve("server.xml"));
         log.accept("server.xml ← " + serverSrc);
@@ -131,6 +139,12 @@ public final class CatalinaBaseWriter {
         // 3) one context descriptor per webapp
         Path hostDir = conf.resolve(eh.engine()).resolve(eh.host());
         Files.createDirectories(hostDir);
+        // host-level defaults shared by every webapp of the host (merged by Tomcat with each descriptor)
+        Path hostDefault = homeConf.resolve(eh.engine()).resolve(eh.host()).resolve("context.xml.default");
+        if (Files.isRegularFile(hostDefault)) {
+            Files.copy(hostDefault, hostDir.resolve("context.xml.default"), StandardCopyOption.REPLACE_EXISTING);
+            log.accept("context.xml.default ← " + hostDefault);
+        }
         List<Path> descriptors = new ArrayList<>();
         Set<String> names = new HashSet<>();
         for (Deployment d : deployments) {
@@ -174,6 +188,11 @@ public final class CatalinaBaseWriter {
     static void addNoCacheFilter(Path webXml) throws Exception {
         Document doc = parse(webXml);
         Element root = doc.getDocumentElement();
+        // already there (a conf/web.xml copied from a generated CATALINA_BASE): adding it twice stops every webapp
+        NodeList names = doc.getElementsByTagName("filter-name");
+        for (int i = 0; i < names.getLength(); i++) {
+            if ("tomcatDevNoCache".equals(names.item(i).getTextContent().trim())) return;
+        }
         Element filter = doc.createElement("filter");
         filter.appendChild(text(doc, "filter-name", "tomcatDevNoCache"));
         filter.appendChild(text(doc, "filter-class", "org.apache.catalina.filters.ExpiresFilter"));
@@ -239,7 +258,8 @@ public final class CatalinaBaseWriter {
         Document doc;
         Map<String, String> values = d.filterValues() == null ? Map.of() : d.filterValues();
         if (d.contextXmlSource() != null && Files.isRegularFile(d.contextXmlSource())) {
-            String text = Files.readString(d.contextXmlSource(), StandardCharsets.UTF_8);
+            // parse the file itself first: entity includes are resolved relative to it, then filtered like the rest
+            String text = toXmlString(parse(d.contextXmlSource()));
             Set<String> keys = PlaceholderFilter.placeholders(text);
             if (!keys.isEmpty() && !values.isEmpty()) {
                 text = PlaceholderFilter.apply(text, values);
@@ -277,6 +297,7 @@ public final class CatalinaBaseWriter {
             ctx.appendChild(res);
         }
         res.setAttribute("cachingAllowed", "false");
+        removeMissingResourceSets(res, "context.xml", log);
 
         // PreResources: the first declared entry wins when paths overlap.
         Set<String> mountedFiles = new HashSet<>();
@@ -363,6 +384,44 @@ public final class CatalinaBaseWriter {
     }
 
     /**
+     * Resource sets already declared in the source context.xml (often an old hand-written or IDE-generated descriptor)
+     * that point to a file or folder that no longer exists, e.g. a jar of an older version in ~/.m2.
+     * Tomcat refuses to start the context for these, so they are dropped with a warning.
+     * Entries with ${...} or a relative base are kept: Tomcat resolves them itself.
+     */
+    static boolean removeMissingResourceSets(Document doc, String origin, Consumer<String> log) {
+        boolean changed = false;
+        NodeList all = doc.getElementsByTagName("Resources");
+        List<Element> list = new ArrayList<>();
+        for (int i = 0; i < all.getLength(); i++) list.add((Element) all.item(i));
+        for (Element r : list) changed |= removeMissingResourceSets(r, origin, log);
+        return changed;
+    }
+
+    static boolean removeMissingResourceSets(Element res, String origin, Consumer<String> log) {
+        List<Element> toRemove = new ArrayList<>();
+        for (Node n = res.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (!(n instanceof Element e)) continue;
+            String tag = e.getTagName();
+            if (!tag.equals("PreResources") && !tag.equals("PostResources")
+                && !tag.equals("JarResources") && !tag.equals("ClassResources")) continue;
+            String b = e.getAttribute("base");
+            if (b.isEmpty() || b.contains("${")) continue;
+            try {
+                Path p = Paths.get(b);
+                if (p.isAbsolute() && !Files.exists(p)) toRemove.add(e);
+            } catch (Exception ignored) {
+                // not a valid path on this OS: let Tomcat report it
+            }
+        }
+        for (Element e : toRemove) {
+            res.removeChild(e);
+            log.accept("⚠ ignored " + e.getTagName() + " from " + origin + ", file not found: " + e.getAttribute("base"));
+        }
+        return !toRemove.isEmpty();
+    }
+
+    /**
      * For every filterable file under {@code root} that contains ${...} placeholders resolvable with {@code values}:
      * writes a filtered copy under {@code outRoot} and mounts it at {@code mountPrefix + relative path}.
      * WEB-INF/classes and WEB-INF/lib below a webapp root are skipped.
@@ -428,13 +487,26 @@ public final class CatalinaBaseWriter {
     private static DocumentBuilder builder() throws Exception {
         DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
         f.setNamespaceAware(false);
-        f.setExpandEntityReferences(false);
+        // Tomcat (Digester) resolves XML entity includes such as
+        //   <!DOCTYPE Server [ <!ENTITY connectors SYSTEM "connectors.xml"> ]> … &connectors;
+        // relative to the including file. Expand them here too: the generated file is self-contained.
+        f.setExpandEntityReferences(true);
         f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
         return f.newDocumentBuilder();
     }
 
     static Document parse(Path p) throws Exception {
-        return builder().parse(p.toFile());
+        Document doc = builder().parse(p.toFile());
+        removeXmlBase(doc.getDocumentElement());
+        return doc;
+    }
+
+    /** The parser marks expanded includes with xml:base; Tomcat would log a warning for each of them. */
+    private static void removeXmlBase(Element e) {
+        e.removeAttribute("xml:base");
+        for (Node n = e.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (n instanceof Element c) removeXmlBase(c);
+        }
     }
 
     static Document parseString(String xml) throws Exception {
@@ -443,6 +515,19 @@ public final class CatalinaBaseWriter {
 
     static Document newDocument() throws Exception {
         return builder().newDocument();
+    }
+
+    static String toXmlString(Document doc) throws Exception {
+        TransformerFactory tf = TransformerFactory.newInstance();
+        try {
+            tf.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        } catch (IllegalArgumentException ignored) {
+        }
+        Transformer t = tf.newTransformer();
+        t.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+        java.io.StringWriter w = new java.io.StringWriter();
+        t.transform(new DOMSource(doc), new StreamResult(w));
+        return w.toString();
     }
 
     static void save(Document doc, Path out) throws Exception {

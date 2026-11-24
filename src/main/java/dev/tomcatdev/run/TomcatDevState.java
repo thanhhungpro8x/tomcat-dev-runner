@@ -83,7 +83,7 @@ public final class TomcatDevState extends JavaCommandLineState {
                 else log.accept("local config: none (create " + localDir + " to override settings outside the project)");
                 DeploymentResolver.FilterValues fv = DeploymentResolver.filterValues(war, Files.isDirectory(localDir) ? localDir : null, log);
                 Path contextXml = DeploymentResolver.resolveContextXml(main ? o.contextXml : "", spec.contextPath(),
-                        Files.isDirectory(localDir) ? localDir : null, war, webapp, home, serverXml, fv.hasSources(), log);
+                        Files.isDirectory(localDir) ? localDir : null, war, webapp, home, serverXml, fv.hasSources(), fv.values(), log);
                 if (contextXml == null) log.accept("no webapp-specific context.xml");
                 DeploymentResolver.ResolvedApp app = DeploymentResolver.resolve(project, m, spec.contextPath(), contextXml,
                         main ? DeploymentResolver.angularDist(project, o) : null, main ? o.angularMount : "/",
@@ -126,7 +126,7 @@ public final class TomcatDevState extends JavaCommandLineState {
         try {
             int jmxPort = TomcatContextReloader.freePort();
             for (String a : TomcatContextReloader.jvmArgs(jmxPort)) vm.add(a);
-            svc.registerTomcat(config.getName(), jmxPort, apps);
+            svc.registerTomcat(config.getName(), jmxPort, apps, o.vmOptions.contains("AllowEnhancedClassRedefinition"));
             log.accept("JMX (context reload) on 127.0.0.1:" + jmxPort);
         } catch (Exception e) {
             log.accept("⚠ could not enable JMX, context reload will not be available: " + e.getMessage());
@@ -136,8 +136,38 @@ public final class TomcatDevState extends JavaCommandLineState {
         p.setEnv(parseEnv(o.envVars));
         p.setPassParentEnvs(true);
 
+        checkBeforeLaunch(o, MavenProjectsManager.getInstance(project).findProject(module), log);
         if (o.startAngularWatch) svc.startAngularWatch();
         return p;
+    }
+
+    /** Recommended Before-launch goal when the Angular watch builds the front end. */
+    static final String RECOMMENDED_GOAL = "package -DskipTests -Dskip.npm -Dskip.installnodenpm";
+
+    /**
+     * Warns when the Maven goal run before launch fights with the Angular watch: frontend-maven-plugin reinstalls
+     * node_modules and rebuilds the front end while the watch uses them, and 'clean' deletes the folders Tomcat serves.
+     */
+    private void checkBeforeLaunch(TomcatDevOptions o, MavenProject war, Consumer<String> log) {
+        if (!o.startAngularWatch) return;
+        boolean frontendPlugin = war != null && war.findPlugin("com.github.eirslett", "frontend-maven-plugin") != null;
+        try {
+            for (var task : config.getBeforeRunTasks()) {
+                if (!task.isEnabled() || !(task instanceof org.jetbrains.idea.maven.tasks.MavenBeforeRunTask maven)) continue;
+                String goal = maven.getGoal() == null ? "" : maven.getGoal().trim();
+                if (frontendPlugin && !goal.contains("skip.npm")) {
+                    log.accept("⚠ Before launch runs 'mvn " + goal + "': frontend-maven-plugin reinstalls node_modules and rebuilds "
+                               + "the front end while the Angular watch is using them. Use instead: " + RECOMMENDED_GOAL
+                               + " (add your profile, e.g. -Pdev)");
+                }
+                if (goal.matches("(?s)(.*\\s)?clean(\\s.*)?")) {
+                    log.accept("⚠ Before launch runs 'mvn " + goal + "': 'clean' deletes target/classes and the Angular output "
+                               + "that Tomcat serves. Remove it from the goal.");
+                }
+            }
+        } catch (Throwable ignored) {
+            // Maven before-run task API not available: no advice
+        }
     }
 
     private static Sdk jdk(Project project, Module module, TomcatDevOptions o) throws CantRunException {

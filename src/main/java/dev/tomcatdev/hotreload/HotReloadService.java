@@ -25,16 +25,17 @@ import com.intellij.notification.NotificationType;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.compiler.CompileScope;
+import com.intellij.openapi.compiler.CompilerPaths;
 import com.intellij.openapi.compiler.CompilerManager;
 import com.intellij.openapi.components.Service;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.module.Module;
+import com.intellij.openapi.module.ModuleManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Key;
 import com.intellij.openapi.util.SystemInfo;
 import com.intellij.util.Alarm;
 import com.intellij.util.execution.ParametersListUtil;
-import com.intellij.xdebugger.XDebugSession;
 import dev.tomcatdev.run.DeploymentResolver;
 import dev.tomcatdev.run.TomcatDevConfigurationType;
 import org.jetbrains.annotations.NotNull;
@@ -42,6 +43,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -139,7 +141,26 @@ public final class HotReloadService implements Disposable {
             warn("Compilation failed (" + errors + " errors) — nothing reloaded.");
             return;
         }
-        ApplicationManager.getApplication().invokeLater(this::hotSwapOrFallback, project.getDisposed());
+        // Compare the compiled classes on a background thread: IntelliJ may report a HotSwap as successful
+        // although a structural change (e.g. a new record component) was not applied.
+        ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            List<String> structural = shapes.structuralChanges(classDirs());
+            ApplicationManager.getApplication().invokeLater(() -> hotSwapOrFallback(structural), project.getDisposed());
+        });
+    }
+
+    /** Output folders (target/classes) of the modules deployed by the running Tomcat Dev configurations. */
+    private List<Path> classDirs() {
+        List<Path> out = new ArrayList<>();
+        Set<String> names = new LinkedHashSet<>();
+        for (TomcatInfo t : tomcats.values()) for (AppInfo a : t.apps()) names.addAll(a.moduleNames());
+        ModuleManager mm = ModuleManager.getInstance(project);
+        for (String n : names) {
+            Module m = mm.findModuleByName(n);
+            String dir = m == null ? null : CompilerPaths.getModuleOutputPath(m, false);
+            if (dir != null) out.add(Paths.get(dir));
+        }
+        return out;
     }
 
     // ================================================================== HotSwap / restart
@@ -152,7 +173,7 @@ public final class HotReloadService implements Disposable {
         return out;
     }
 
-    private void hotSwapOrFallback() {
+    private void hotSwapOrFallback(List<String> structural) {
         String mode = s().classChangeMode;
         List<DebuggerSession> sessions = debugSessions();
         if (findTomcatDescriptor() == null && sessions.isEmpty()) return;
@@ -163,6 +184,12 @@ public final class HotReloadService implements Disposable {
         }
         if (sessions.isEmpty()) {
             onCannotHotSwap("Tomcat is running in Run mode, so HotSwap is not available.");
+            return;
+        }
+        boolean enhanced = tomcats.values().stream().anyMatch(TomcatInfo::enhancedRedefinition);
+        if (!structural.isEmpty() && !enhanced) {
+            String which = structural.size() <= 3 ? String.join(", ", structural) : structural.size() + " classes";
+            onCannotHotSwap("Structural change in " + which + " (field, method or signature added/removed): HotSwap cannot apply it.");
             return;
         }
         for (DebuggerSession session : sessions) {
@@ -205,7 +232,9 @@ public final class HotReloadService implements Disposable {
     /** A webapp deployed by a running Tomcat Dev configuration and the IntelliJ modules it contains. */
     public record AppInfo(String contextPath, Set<String> moduleNames) {}
 
-    private record TomcatInfo(int jmxPort, List<AppInfo> apps) {}
+    private record TomcatInfo(int jmxPort, List<AppInfo> apps, boolean enhancedRedefinition) {}
+
+    private final ClassShapes shapes = new ClassShapes();
 
     private final Map<String, TomcatInfo> tomcats = new ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicBoolean reloading = new java.util.concurrent.atomic.AtomicBoolean();
@@ -214,7 +243,17 @@ public final class HotReloadService implements Disposable {
 
     /** Called by TomcatDevState at launch: remembers the JMX port and the webapps of this configuration. */
     public void registerTomcat(String configName, int jmxPort, List<AppInfo> apps) {
-        tomcats.put(configName, new TomcatInfo(jmxPort, List.copyOf(apps)));
+        registerTomcat(configName, jmxPort, apps, false);
+    }
+
+    /**
+     * @param enhancedRedefinition the JVM runs with -XX:+AllowEnhancedClassRedefinition (JetBrains Runtime):
+     *                             structural changes can be HotSwapped, no reload needed
+     */
+    public void registerTomcat(String configName, int jmxPort, List<AppInfo> apps, boolean enhancedRedefinition) {
+        tomcats.put(configName, new TomcatInfo(jmxPort, List.copyOf(apps), enhancedRedefinition));
+        // shape of the classes the new JVM starts with (compiled by the before-launch build)
+        ApplicationManager.getApplication().executeOnPooledThread(() -> shapes.snapshot(classDirs()));
     }
 
     /** Reloads every webapp of the running Tomcat Dev (toolbar / menu action). */
@@ -283,11 +322,6 @@ public final class HotReloadService implements Disposable {
 
     private static String displayPath(String p) {
         return p == null || p.isBlank() || p.equals("/") ? "/" : (p.startsWith("/") ? p : "/" + p);
-    }
-
-    private static @Nullable RunContentDescriptor descriptorOf(DebuggerSession session) {
-        XDebugSession x = session.getXDebugSession();
-        return x != null ? x.getRunContentDescriptor() : null;
     }
 
     public void restartTomcat() {

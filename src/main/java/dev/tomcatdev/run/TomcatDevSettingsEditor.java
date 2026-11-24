@@ -166,8 +166,9 @@ public final class TomcatDevSettingsEditor extends SettingsEditor<TomcatDevRunCo
                         + "1. " + code("<local config folder>/context.xml") + "<br>"
                         + "2. " + code("CATALINA_HOME/conf/Catalina/localhost/<app>.xml") + "<br>"
                         + "3. " + code("<contextFile>") + " / " + code("<containerConfigXML>") + " of the Maven plugins<br>"
-                        + "4. " + code("src/main/webapp/META-INF/context.xml") + " (placeholders filtered by the plugin)<br>"
-                        + "5. " + code("target/<finalName>/META-INF/context.xml") + " (filtered by Maven)"))
+                        + "4. " + code("META-INF/context.xml") + " copied by " + code("<webResources>") + " of maven-war-plugin<br>"
+                        + "5. " + code("src/main/webapp/META-INF/context.xml") + " (placeholders filtered by the plugin)<br>"
+                        + "6. " + code("target/<finalName>/META-INF/context.xml") + " (filtered by Maven)"))
 
                 .addSeparator()
                 .addLabeledComponent("Alternative JRE:", altJre)
@@ -184,6 +185,12 @@ public final class TomcatDevSettingsEditor extends SettingsEditor<TomcatDevRunCo
                 .addLabeledComponent("Mount Angular at:", angularMount)
                 .addComponentToRightColumn(hint("Path inside the webapp where the Angular files are served."))
                 .addComponent(startAngular)
+                .addComponentToRightColumn(hint("Runs the watch command of <i>Settings › Tools › Dev Runner for Apache Tomcat</i>. "
+                        + "With the watch on, the Maven goal under <b>Before launch</b> must not build the front end "
+                        + "(it would reinstall node_modules while the watch uses them) and must not clean:<br>"
+                        + code(TomcatDevState.RECOMMENDED_GOAL) + "<br>"
+                        + code("-Dskip.npm") + " and " + code("-Dskip.installnodenpm") + " skip frontend-maven-plugin. "
+                        + "Add your profile if needed, e.g. " + code("-Pdev") + "."))
                 .addComponent(noCache)
                 .addComponentToRightColumn(hint("After an Angular rebuild, a normal browser refresh shows the change. "
                         + "Applies to this development Tomcat only."))

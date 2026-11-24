@@ -239,6 +239,9 @@ The file `conf/Catalina/localhost/<name>.xml` is built from your own `context.xm
 </Context>
 ```
 
+- Resource sets already declared in your `context.xml` (and in `server.xml` or the global `conf/context.xml`) are kept, except those whose absolute `base` no longer exists
+  (for example a jar of an older version in `~/.m2` left in an old hand-written descriptor). These are dropped with
+  the warning *⚠ ignored PostResources from context.xml, file not found: …*, because Tomcat would refuse to start.
 - `cachingAllowed="false"` makes Tomcat read files from disk on every request, so edits are visible immediately.
 - `reloadable="false"`: reloading is controlled by the plugin, not by Tomcat's periodic class scanning.
 - Libraries are mounted as real `WEB-INF/lib` jars, so `ServletContainerInitializer` discovery (the mechanism Spring
@@ -273,13 +276,39 @@ When the *context.xml* field is empty, the first match wins. The order follows T
 2. `CATALINA_HOME/conf/<Engine>/<Host>/<name>.xml` — a descriptor already deployed in your Tomcat for this context
 3. `<contextFile>` of `tomcat7/8-maven-plugin`
 4. `<containerConfigXML>` of `maven-war-plugin`
-5. `src/main/webapp/META-INF/context.xml` **filtered by the plugin**, when filter values are available (see [16.3](#163-placeholder-filtering-by-the-plugin))
-6. `target/<finalName>/META-INF/context.xml` — the copy filtered by Maven, if it contains no unresolved `${…}`
-7. `src/main/webapp/META-INF/context.xml` as is — a warning is logged if it still contains placeholders
-8. `src/main/resources/META-INF/context.xml`
+5. `META-INF/context.xml` copied into the WAR by `maven-war-plugin` `<webResources>` (for example from a `conf/`
+   folder, with or without `<targetPath>`). In the WAR this file replaces `src/main/webapp/META-INF/context.xml`, so the
+   plugin does the same. It uses the source file **filtered by the plugin** when every `${…}` in it is known (so the
+   local `env.properties` applies), otherwise the copy built by Maven in `target/<finalName>/META-INF/context.xml`
+6. `src/main/webapp/META-INF/context.xml` **filtered by the plugin**, when filter values are available (see [16.3](#163-placeholder-filtering-by-the-plugin))
+7. `target/<finalName>/META-INF/context.xml` — the copy filtered by Maven, if it contains no unresolved `${…}`
+8. `src/main/webapp/META-INF/context.xml` as is — a warning is logged if it still contains placeholders
+9. `src/main/resources/META-INF/context.xml`
 
 `${catalina.*}`, `${java.*}`, `${user.*}` and `${os.*}` are not treated as Maven placeholders, because Tomcat
 resolves them itself.
+
+#### Configuration split into several files
+
+Tomcat uses **one** `server.xml` per server and **one** context descriptor per webapp, so the plugin has one field for
+each. Configuration split into smaller files keeps working, because the plugin reads it the way Tomcat does:
+
+- **XML entity includes** in `server.xml` or `context.xml` are resolved relative to the including file, and the
+  included content is written into the generated file (`${…}` in included files is filtered too):
+  ```xml
+  <!DOCTYPE Context [
+    <!ENTITY datasources SYSTEM "datasources.xml">
+    <!ENTITY batch-params SYSTEM "batch-params.xml">
+  ]>
+  <Context>
+    &datasources;
+    &batch-params;
+  </Context>
+  ```
+- **Defaults shared by every webapp**: `CATALINA_HOME/conf/context.xml` and
+  `CATALINA_HOME/conf/<Engine>/<Host>/context.xml.default` are copied to the development `CATALINA_BASE`; Tomcat merges
+  them with each webapp's descriptor.
+- `catalina.properties`, `tomcat-users.xml`, `logging.properties`, … from `CATALINA_HOME/conf` are copied as well.
 
 ### 7.5 Files taken from the built WAR
 
@@ -289,8 +318,13 @@ Files under `target/<finalName>/WEB-INF` (except `classes/` and `lib/`) are used
 - the file exists only in `target` (generated during the build, for example by `maven-war-plugin` `webResources`).
 
 Files that are not filtered keep being served from `src/main/webapp`, so changes to them show up immediately.
-`target/<finalName>/WEB-INF/classes` and `lib` are always ignored, because they may be stale. Classes always come
-from each module's `target/classes`.
+
+`target/<finalName>/WEB-INF/classes` is handled separately: `.class` files there are always ignored (they may be
+stale; classes always come from each module's `target/classes`), but **resources that exist only there** are mounted.
+This covers projects that copy `application.properties`, `logback.xml`, … into the WAR with
+`maven-war-plugin` `webResources` and `<targetPath>WEB-INF/classes</targetPath>` instead of `src/main/resources`.
+Run `mvn package -DskipTests` once (and again after changing those files) so they exist in `target/<finalName>`.
+`target/<finalName>/WEB-INF/lib` is always ignored.
 
 ### 7.6 Module and library resolution
 
@@ -443,13 +477,25 @@ package -DskipTests -Dskip.npm -Dskip.installnodenpm
 
 Avoid `clean` in this goal: it deletes the folders that Tomcat and the Angular watch are using, and makes every launch
 and restart rebuild the front end. The `-Dskip.*` flags apply to `frontend-maven-plugin`; drop them if you do not use it.
+Add your profile when the build needs one, for example `package -Pdev -DskipTests -Dskip.npm -Dskip.installnodenpm`.
+
+When *Start the Angular watch* is on, the plugin checks this goal at each launch and logs a warning in the
+*Tomcat Dev* tool window if it would run `frontend-maven-plugin` (no `-Dskip.npm`) or contains `clean`.
 
 ---
 
 ## 11. Enhanced HotSwap with JetBrains Runtime and HotswapAgent
 
-With a standard JVM, HotSwap is limited to method bodies, and the plugin falls back to a context reload. To redefine
-classes structurally without any reload:
+With a standard JVM, HotSwap is limited to method bodies, and the plugin falls back to a context reload.
+
+Before each HotSwap, the plugin compares the compiled classes with their previous version (fields, methods, signatures,
+modifiers, super types; a lambda added to a method body counts too, because it adds a hidden method). When the shape
+changed, it reloads the context directly and logs *Structural change in … HotSwap cannot apply it*. IntelliJ sometimes
+reports such a HotSwap as successful although it was not applied, which left old and new classes mixed
+(`NoSuchMethodError`). When the VM options contain `-XX:+AllowEnhancedClassRedefinition`, this check is skipped and the
+HotSwap is attempted.
+
+To redefine classes structurally without any reload:
 
 1. Install a **JetBrains Runtime (JBR) 21** and set it as *Alternative JRE* in the run configuration.
 2. Download `hotswap-agent.jar` from the HotswapAgent releases and place it at `<JBR>/lib/hotswap/hotswap-agent.jar`.
@@ -494,6 +540,9 @@ Notifications for failed HotSwaps or reloads offer *Reload Context* and *Restart
 | *Tomcat is running in Run mode, so HotSwap is not available* | Started with Run | Expected in Run mode; the default mode reloads the context instead. Use Debug for HotSwap |
 | *No JMX port known for '…'* | Tomcat was started before the plugin was installed or updated | Stop the configuration and start it again |
 | *Context reload failed: …* | Application failed to start after reload, or JMX unreachable | Check the run console for the startup exception; use *Restart Tomcat* |
+| *The file specified by base and internal path […jar]\[] does not exist* (2.3.0) | The `context.xml`, `server.xml` or global `conf/context.xml` used declares a `PostResources` jar that is not in `~/.m2` | Update to 2.3.1 (such entries are ignored), or remove the entry / the old descriptor. The tool window shows which `context.xml` is used |
+| *Could not resolve placeholder '…'* for a value that is a `<Parameter>` of the WAR's `context.xml` (2.3.0) | The full `context.xml` is copied into the WAR by `webResources`; 2.3.0 used the incomplete one from `src/main/webapp` | Update to 2.3.1, or set the *context.xml* field to `target/<finalName>/META-INF/context.xml` |
+| *class path resource [application.properties] cannot be opened* (2.3.0) | The file is copied into `WEB-INF/classes` by `maven-war-plugin` `webResources`, not in `target/classes` | Update to 2.3.1 and run `mvn package -DskipTests` once ([section 7.5](#75-files-taken-from-the-built-war)) |
 | *⚠ skipped (not built yet): …/target/classes* | Module never compiled | Build the project, then restart |
 | *⚠ Angular dist does not exist yet* | Angular not built before launch | Build Angular once, then restart |
 | *⚠ … is a template with unresolved ${…}* | Maven filtering has not run | Run the WAR build ([section 10](#10-projects-that-use-maven-resource-filtering)) |
