@@ -39,6 +39,16 @@
     ]]></description>
 
     <change-notes><![CDATA[
+    <b>2.3.2</b>
+    <ul>
+      <li>context.xml: after the local config folder, the file Maven packages (target/&lt;finalName&gt;/META-INF/context.xml)
+          now always comes first. 2.3.1 could prefer the template in src/main/webapp, which may miss entries the build adds
+          ("Could not resolve placeholder" at startup). Local env.properties overrides still apply, and a warning tells
+          when the source changed after the last build.</li>
+      <li>Fix: ${...} properties in maven-war-plugin &lt;webResources&gt; directories (e.g. ../conf/${env}) are resolved.</li>
+      <li>Fix (Windows): paths shown as ~\… in the run configuration (Tomcat home, local config folder…) are expanded to the
+          user folder again when saved and at launch.</li>
+    </ul>
     <b>2.3.1</b>
     <ul>
       <li>Fix: resources that the WAR build copies into WEB-INF/classes with maven-war-plugin webResources

@@ -164,11 +164,13 @@ public final class TomcatDevSettingsEditor extends SettingsEditor<TomcatDevRunCo
                 .addComponentToRightColumn(hint(
                         "Leave empty to use the first file found:<br>"
                         + "1. " + code("<local config folder>/context.xml") + "<br>"
-                        + "2. " + code("CATALINA_HOME/conf/Catalina/localhost/<app>.xml") + "<br>"
-                        + "3. " + code("<contextFile>") + " / " + code("<containerConfigXML>") + " of the Maven plugins<br>"
-                        + "4. " + code("META-INF/context.xml") + " copied by " + code("<webResources>") + " of maven-war-plugin<br>"
-                        + "5. " + code("src/main/webapp/META-INF/context.xml") + " (placeholders filtered by the plugin)<br>"
-                        + "6. " + code("target/<finalName>/META-INF/context.xml") + " (filtered by Maven)"))
+                        + "2. " + code("target/<finalName>/META-INF/context.xml") + " (what Maven packages; its source filtered "
+                        + "by the plugin when " + code("env.properties") + " overrides one of its values)<br>"
+                        + "3. if the WAR is not built: " + code("META-INF/context.xml") + " copied by " + code("<webResources>")
+                        + " of maven-war-plugin<br>"
+                        + "4. " + code("<contextFile>") + " / " + code("<containerConfigXML>") + " of the Maven plugins<br>"
+                        + "5. " + code("CATALINA_HOME/conf/Catalina/localhost/<app>.xml") + "<br>"
+                        + "6. " + code("src/main/webapp/META-INF/context.xml") + " (placeholders filtered by the plugin)"))
 
                 .addSeparator()
                 .addLabeledComponent("Alternative JRE:", altJre)
@@ -246,7 +248,8 @@ public final class TomcatDevSettingsEditor extends SettingsEditor<TomcatDevRunCo
     /** ~/x → absolute path (other fields are used as real paths). */
     private static String expand(String s) {
         String v = s == null ? "" : s.trim();
-        if (v.equals("~") || v.startsWith("~/")) return System.getProperty("user.home") + v.substring(1);
+        // "~/" and, on Windows, "~\" (the form shows paths under the home folder that way)
+        if (v.equals("~") || v.startsWith("~/") || v.startsWith("~\\")) return System.getProperty("user.home") + v.substring(1);
         return v;
     }
 

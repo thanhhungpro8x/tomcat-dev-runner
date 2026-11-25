@@ -270,20 +270,22 @@ remain on the common classpath.
 
 ### 7.4 How context.xml is found
 
-When the *context.xml* field is empty, the first match wins. The order follows Tomcat's own precedence:
+When the *context.xml* field is empty, the first match wins. Your local configuration comes first, then what Maven
+really packages:
 
 1. `<local config>/context.xml` — outside the project (see [16](#16-local-configuration-outside-the-project))
-2. `CATALINA_HOME/conf/<Engine>/<Host>/<name>.xml` — a descriptor already deployed in your Tomcat for this context
-3. `<contextFile>` of `tomcat7/8-maven-plugin`
-4. `<containerConfigXML>` of `maven-war-plugin`
-5. `META-INF/context.xml` copied into the WAR by `maven-war-plugin` `<webResources>` (for example from a `conf/`
-   folder, with or without `<targetPath>`). In the WAR this file replaces `src/main/webapp/META-INF/context.xml`, so the
-   plugin does the same. It uses the source file **filtered by the plugin** when every `${…}` in it is known (so the
-   local `env.properties` applies), otherwise the copy built by Maven in `target/<finalName>/META-INF/context.xml`
+2. `target/<finalName>/META-INF/context.xml` — the file the build puts into the WAR, already filtered by Maven,
+   wherever it comes from (`src/main/webapp`, `maven-war-plugin` `<webResources>` from a `conf/` folder, a profile…).
+   - Exception: when `<local config>/env.properties` overrides a `${…}` of that file, the plugin filters its source
+     instead (the `<webResources>` file, or `src/main/webapp/META-INF/context.xml`) so the local value applies. It does so
+     only if the source declares every `Parameter`, `Environment`, `Resource` and `ResourceLink` of the built copy.
+   - If the source was edited after the last build, a warning asks to run `mvn package` again.
+3. The WAR is not built yet: `META-INF/context.xml` copied by `maven-war-plugin` `<webResources>`, filtered by the plugin
+4. `<contextFile>` of `tomcat7/8-maven-plugin`, then `<containerConfigXML>` of `maven-war-plugin`
+5. `CATALINA_HOME/conf/<Engine>/<Host>/<name>.xml` — a descriptor left in your Tomcat installation
 6. `src/main/webapp/META-INF/context.xml` **filtered by the plugin**, when filter values are available (see [16.3](#163-placeholder-filtering-by-the-plugin))
-7. `target/<finalName>/META-INF/context.xml` — the copy filtered by Maven, if it contains no unresolved `${…}`
-8. `src/main/webapp/META-INF/context.xml` as is — a warning is logged if it still contains placeholders
-9. `src/main/resources/META-INF/context.xml`
+7. `src/main/webapp/META-INF/context.xml` as is — a warning is logged if it still contains placeholders
+8. `src/main/resources/META-INF/context.xml`
 
 `${catalina.*}`, `${java.*}`, `${user.*}` and `${os.*}` are not treated as Maven placeholders, because Tomcat
 resolves them itself.

@@ -79,7 +79,15 @@ public final class TomcatDevState extends JavaCommandLineState {
                 MavenProject war = mpm.findProject(m);
                 Path webapp = DeploymentResolver.webappDir(m, war);
                 Path localDir = DeploymentResolver.localDir(project, spec.localConfigDir(), spec.contextPath());
-                if (Files.isDirectory(localDir)) log.accept("local config: " + localDir);
+                if (Files.isDirectory(localDir)) {
+                    log.accept("local config: " + localDir);
+                    // a built WAR (target/<finalName>) has another layout: META-INF/context.xml, WEB-INF/classes…
+                    if (Files.isDirectory(localDir.resolve("WEB-INF")) || Files.isRegularFile(localDir.resolve("META-INF").resolve("context.xml"))) {
+                        log.accept("⚠ the local config folder looks like a built WAR. Its files are not read from there: a local config "
+                                   + "folder uses context.xml, env.properties, classes/, lib/ and webapp/ at its root. The built WAR in "
+                                   + "target is already used by default; leave the field empty or point it to a folder of your own.");
+                    }
+                }
                 else log.accept("local config: none (create " + localDir + " to override settings outside the project)");
                 DeploymentResolver.FilterValues fv = DeploymentResolver.filterValues(war, Files.isDirectory(localDir) ? localDir : null, log);
                 Path contextXml = DeploymentResolver.resolveContextXml(main ? o.contextXml : "", spec.contextPath(),

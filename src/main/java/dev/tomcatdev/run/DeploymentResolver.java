@@ -98,11 +98,38 @@ public final class DeploymentResolver {
             return found(localDir.resolve("context.xml"), "local config", log);
         }
 
-        CatalinaBaseWriter.EngineHost eh = CatalinaBaseWriter.engineHost(serverXml);
-        String name = CatalinaBaseWriter.descriptorName(contextPath);
-        Path homeDescriptor = tomcatHome.resolve("conf").resolve(eh.engine()).resolve(eh.host()).resolve(name + ".xml");
-        if (Files.isRegularFile(homeDescriptor)) return found(homeDescriptor, "CATALINA_HOME descriptor", log);
+        Path srcTemplate = webappDir == null ? null : webappDir.resolve("META-INF").resolve("context.xml");
+        // file the build copies to META-INF/context.xml: maven-war-plugin <webResources>, else src/main/webapp
+        Path wr = war == null ? null : webResourceSource(war, "META-INF/context.xml");
+        Path source = wr != null ? wr : (srcTemplate != null && Files.isRegularFile(srcTemplate) ? srcTemplate : null);
+        Path built = war == null || war.getBuildDirectory() == null || war.getFinalName() == null ? null
+                : Paths.get(war.getBuildDirectory(), war.getFinalName(), "META-INF", "context.xml");
 
+        // 3. What Maven really packages: target/<finalName>/META-INF/context.xml (filtered by the build).
+        if (built != null && Files.isRegularFile(built) && !hasMavenPlaceholders(built)) {
+            // Exception: <local config>/env.properties overrides a ${...} of the same file → filter its source instead,
+            // only when the source declares everything the built copy declares (it differs by values only).
+            if (canFilter && source != null && hasMavenPlaceholders(source) && allResolvable(source, filterValues)
+                && localOverrides(localDir, source) && declaredNames(source).containsAll(declaredNames(built))) {
+                return found(source, "source of the built context.xml, filtered by the plugin (local env.properties overrides "
+                                     + "some of its values)", log);
+            }
+            if (source != null && isNewer(source, built)) {
+                log.accept("⚠ " + source + " changed after the last build: run 'mvn package -DskipTests -Dskip.npm "
+                           + "-Dskip.installnodenpm' to update " + built);
+            }
+            return found(built, "built by Maven: target/" + war.getFinalName(), log);
+        }
+
+        // 4. Not built yet: the file the build would copy, filtered by the plugin.
+        if (wr != null) {
+            if (hasMavenPlaceholders(wr) && !canFilter) {
+                log.accept("⚠ " + wr + " has ${...} placeholders and the WAR is not built yet. Run 'mvn package -DskipTests' once");
+            }
+            return found(wr, "maven-war-plugin webResources" + (canFilter ? ", filtered by the plugin" : ""), log);
+        }
+
+        // 5. Maven plugin settings, then a descriptor left in the Tomcat installation.
         if (war != null) {
             for (String a : TOMCAT_MVN_PLUGINS) {
                 Path p = pluginPath(war, TOMCAT_MVN_GROUP, a, "contextFile");
@@ -110,36 +137,15 @@ public final class DeploymentResolver {
             }
             Path p = pluginPath(war, WAR_GROUP, WAR_PLUGIN, "containerConfigXML");
             if (p != null && Files.isRegularFile(p)) return found(p, "maven-war-plugin <containerConfigXML>", log);
+        }
+        CatalinaBaseWriter.EngineHost eh = CatalinaBaseWriter.engineHost(serverXml);
+        String name = CatalinaBaseWriter.descriptorName(contextPath);
+        Path homeDescriptor = tomcatHome.resolve("conf").resolve(eh.engine()).resolve(eh.host()).resolve(name + ".xml");
+        if (Files.isRegularFile(homeDescriptor)) return found(homeDescriptor, "CATALINA_HOME descriptor", log);
 
-            // META-INF/context.xml copied into the WAR by maven-war-plugin <webResources> (e.g. from a conf/ folder):
-            // it replaces the copy in src/main/webapp, so the built file (or its source) is the real one.
-            Path wr = webResourceSource(war, "META-INF/context.xml");
-            if (wr != null) {
-                Path built = war.getBuildDirectory() == null || war.getFinalName() == null ? null
-                        : Paths.get(war.getBuildDirectory(), war.getFinalName(), "META-INF", "context.xml");
-                // Source filtered by the plugin when every placeholder is known (always fresh, local env.properties applies),
-                // otherwise the copy Maven built.
-                if (canFilter && hasMavenPlaceholders(wr) && allResolvable(wr, filterValues)) {
-                    return found(wr, "maven-war-plugin webResources, filtered by the plugin", log);
-                }
-                if (built != null && Files.isRegularFile(built) && !hasMavenPlaceholders(built)) {
-                    return found(built, "built by maven-war-plugin webResources from " + wr, log);
-                }
-                if (hasMavenPlaceholders(wr) && !canFilter) {
-                    log.accept("⚠ " + wr + " has ${...} placeholders and " + (built == null ? "the WAR" : built)
-                               + " is not built yet. Run 'mvn package -DskipTests' once");
-                }
-                return found(wr, "maven-war-plugin webResources" + (canFilter ? ", filtered by the plugin" : ""), log);
-            }
-        }
-        // The src template is filtered by the plugin when values are available (always up to date).
-        // Otherwise the copy already filtered by Maven (maven-war-plugin webResources) wins over the template in src.
-        if (canFilter && webappDir != null && hasMavenPlaceholders(webappDir.resolve("META-INF").resolve("context.xml"))) {
-            return found(webappDir.resolve("META-INF").resolve("context.xml"), "webapp META-INF template, filtered by the plugin", log);
-        }
-        if (war != null && war.getBuildDirectory() != null && war.getFinalName() != null) {
-            Path p = Paths.get(war.getBuildDirectory(), war.getFinalName(), "META-INF", "context.xml");
-            if (Files.isRegularFile(p) && !hasMavenPlaceholders(p)) return found(p, "filtered: target/" + war.getFinalName(), log);
+        // 6. The template in src, filtered by the plugin (WAR never built).
+        if (canFilter && srcTemplate != null && hasMavenPlaceholders(srcTemplate)) {
+            return found(srcTemplate, "webapp META-INF template, filtered by the plugin (WAR not built yet)", log);
         }
         if (webappDir != null) {
             Path p = webappDir.resolve("META-INF").resolve("context.xml");
@@ -222,7 +228,7 @@ public final class DeploymentResolver {
     public static Path localDir(@NotNull Project project, @Nullable String configured, @NotNull String contextPath) {
         if (configured != null && !configured.isBlank()) {
             String c = configured.trim();
-            if (c.startsWith("~/")) c = System.getProperty("user.home") + c.substring(1);
+            if (c.equals("~") || c.startsWith("~/") || c.startsWith("~\\")) c = System.getProperty("user.home") + c.substring(1);
             return Paths.get(c);
         }
         return projectLocalRoot(project).resolve(CatalinaBaseWriter.descriptorName(contextPath));
@@ -384,7 +390,7 @@ public final class DeploymentResolver {
             for (Element r : wrs.getChildren("resource")) {
                 String dir = r.getChildTextTrim("directory");
                 if (dir == null || dir.isEmpty()) continue;
-                dir = dir.replace("${project.basedir}", war.getDirectory()).replace("${basedir}", war.getDirectory());
+                dir = PlaceholderFilter.apply(dir, pomValues(war));
                 if (dir.contains("${")) continue;
                 String target = r.getChildTextTrim("targetPath");
                 target = target == null ? "" : target.replace('\\', '/').replaceAll("^/+|/+$", "");
@@ -400,6 +406,60 @@ public final class DeploymentResolver {
             return result;
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    /** Properties usable in pom paths: pom properties plus the usual project.* values. */
+    private static Map<String, String> pomValues(MavenProject war) {
+        Map<String, String> v = new LinkedHashMap<>();
+        try {
+            for (String k : war.getProperties().stringPropertyNames()) v.put(k, war.getProperties().getProperty(k));
+        } catch (Throwable ignored) {
+        }
+        v.put("project.basedir", war.getDirectory());
+        v.put("basedir", war.getDirectory());
+        if (war.getBuildDirectory() != null) v.put("project.build.directory", war.getBuildDirectory());
+        if (war.getFinalName() != null) v.put("project.build.finalName", war.getFinalName());
+        return v;
+    }
+
+    /** Parameter / Environment / Resource / ResourceLink names declared in a context.xml ("Parameter:name"). */
+    static Set<String> declaredNames(Path contextXml) {
+        Set<String> out = new TreeSet<>();
+        try {
+            var f = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            f.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+            var doc = f.newDocumentBuilder().parse(contextXml.toFile());
+            for (String tag : new String[]{"Parameter", "Environment", "Resource", "ResourceLink"}) {
+                var list = doc.getElementsByTagName(tag);
+                for (int i = 0; i < list.getLength(); i++) {
+                    String name = ((org.w3c.dom.Element) list.item(i)).getAttribute("name");
+                    if (!name.isEmpty()) out.add(tag + ":" + name);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return out;
+    }
+
+    /** &lt;local config&gt;/env.properties defines a key used as ${...} in {@code file}. */
+    private static boolean localOverrides(@Nullable Path localDir, Path file) {
+        if (localDir == null) return false;
+        Path env = localDir.resolve("env.properties");
+        if (!Files.isRegularFile(env)) return false;
+        try {
+            Set<String> keys = PlaceholderFilter.load(env).keySet();
+            for (String k : PlaceholderFilter.placeholders(Files.readString(file))) if (keys.contains(k)) return true;
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private static boolean isNewer(Path a, Path b) {
+        try {
+            return Files.getLastModifiedTime(a).toMillis() > Files.getLastModifiedTime(b).toMillis() + 1000;
+        } catch (Exception e) {
+            return false;
         }
     }
 
